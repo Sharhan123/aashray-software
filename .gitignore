@@ -10,3 +10,5 @@ coverage/
 .DS_Store
 client/.vite/
 server/.data/
+
+.vercel
