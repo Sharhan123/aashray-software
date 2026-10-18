@@ -10,6 +10,7 @@ const appSettingsSchema = new Schema({
   reminderOffsets: { type: [Number], default: [3, 0, -3] },
   paymentMethods: { type: [String], default: ['CASH', 'BANK_TRANSFER', 'UPI', 'OTHER'] },
   utilityTypes: { type: [String], default: ['ELECTRICITY', 'AC', 'OTHER'] },
+  rentReminderTemplate: { type: String, default: 'Hello {residentName}, there is a rent due of {amount} from Aashray Paying Guest for {month}. Please pay it within 5 days of the due date ({dueDate}). Thank you.', maxlength: 1000 },
   whatsappPhoneNumberId: { type: String, default: '' },
   whatsappBusinessAccountId: { type: String, default: '' },
   whatsappEnabled: { type: Boolean, default: false },

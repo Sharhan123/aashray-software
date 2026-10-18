@@ -210,12 +210,40 @@ export async function downloadReceiptPdf(data: ReceiptPdfData, amountWords: stri
   const brandLogo = await loadBrandLogo();
   const canvas = makeReceiptCanvas(data, amountWords, brandLogo);
   const blob = await createPdf(canvas);
+  saveReceiptBlob(blob, data.receiptNumber);
+}
+
+function saveReceiptBlob(blob: Blob, receiptNumber: string) {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = url;
-  anchor.download = `${data.receiptNumber.replace(/[^A-Za-z0-9_-]/g, '-')}.pdf`;
+  anchor.download = `${receiptNumber.replace(/[^A-Za-z0-9_-]/g, '-')}.pdf`;
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function receiptBlob(data: ReceiptPdfData, amountWords: string) {
+  const brandLogo = await loadBrandLogo();
+  return createPdf(makeReceiptCanvas(data, amountWords, brandLogo));
+}
+
+export async function printReceiptPdf(data: ReceiptPdfData, amountWords: string) {
+  const printWindow = window.open('', '_blank');
+  if (!printWindow) throw new Error('Allow pop-ups to open the receipt for printing.');
+  try {
+    const blob = await receiptBlob(data, amountWords);
+    const url = URL.createObjectURL(blob);
+    printWindow.location.href = url;
+    window.setTimeout(() => { try { printWindow.print(); } catch { /* The PDF viewer can still print from its toolbar. */ } }, 900);
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  } catch (error) { printWindow.close(); throw error; }
+}
+
+export async function shareReceiptPdf(data: ReceiptPdfData, amountWords: string) {
+  const blob = await receiptBlob(data, amountWords);
+  const file = new File([blob], `${data.receiptNumber.replace(/[^A-Za-z0-9_-]/g, '-')}.pdf`, { type: 'application/pdf' });
+  if (navigator.share && navigator.canShare?.({ files: [file] })) await navigator.share({ title: 'Aashray payment receipt', files: [file] });
+  else saveReceiptBlob(blob, data.receiptNumber);
 }

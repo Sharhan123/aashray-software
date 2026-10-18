@@ -14,6 +14,7 @@ import { AuditEvent } from '../models/AuditEvent.js';
 import { User } from '../models/User.js';
 import { Session } from '../models/Session.js';
 import { inTransaction } from '../services/transactions.js';
+import { asyncHandler } from '../middleware/asyncHandler.js';
 
 const router = Router();
 router.use(requireAuth, requireRole('SUPER_ADMIN'));
@@ -24,11 +25,11 @@ async function getOperationalCounts() {
   return Object.fromEntries(entries);
 }
 
-router.get('/admin/operational-data/summary', async (_req, res) => {
+router.get('/admin/operational-data/summary', asyncHandler(async (_req, res) => {
   return res.json({ counts: await getOperationalCounts(), warning: 'Delete all permanently removes residents, properties, rooms, financial records, message history, staff accounts, and prior audit history. Your Super Admin account and business settings are kept.' });
-});
+}));
 
-router.delete('/residents/:id', async (req, res) => {
+router.delete('/residents/:id', asyncHandler(async (req, res) => {
   const { reason } = z.object({ reason: z.string().trim().min(5).max(500) }).parse(req.body);
   const resident = await Resident.findById(req.params.id).select('_id');
   if (!resident) return res.status(404).json({ error: 'Resident not found.' });
@@ -46,9 +47,9 @@ router.delete('/residents/:id', async (req, res) => {
     await AuditEvent.create([{ actorId: req.user!.id, action: 'RESIDENT_PERMANENTLY_DELETED', entityType: 'Resident', entityId: String(resident._id), reason, details: counts }], { session });
   });
   return res.json({ deleted: true, counts });
-});
+}));
 
-router.delete('/properties/:id', async (req, res) => {
+router.delete('/properties/:id', asyncHandler(async (req, res) => {
   const { reason } = z.object({ reason: z.string().trim().min(5).max(500) }).parse(req.body);
   const property = await Property.findById(req.params.id);
   if (!property) return res.status(404).json({ error: 'Property not found.' });
@@ -62,9 +63,9 @@ router.delete('/properties/:id', async (req, res) => {
     await AuditEvent.create([{ actorId: req.user!.id, action: 'PROPERTY_DELETED', entityType: 'Property', entityId: String(property._id), reason, details: { preservedRooms: roomIds.length } }], { session });
   });
   return res.json({ deleted: true, preservedRooms: roomIds.length });
-});
+}));
 
-router.delete('/admin/operational-data', async (req, res) => {
+router.delete('/admin/operational-data', asyncHandler(async (req, res) => {
   const { confirmation, reason } = z.object({ confirmation: z.literal('DELETE ALL'), reason: z.string().trim().min(5).max(500) }).parse(req.body);
   if (confirmation !== 'DELETE ALL') return res.status(422).json({ error: 'Type DELETE ALL to confirm.' });
   const counts = await getOperationalCounts();
@@ -86,6 +87,6 @@ router.delete('/admin/operational-data', async (req, res) => {
     await AuditEvent.create([{ actorId: req.user!.id, action: 'OPERATIONAL_DATA_PURGED', entityType: 'Workspace', entityId: 'operational-data', reason, details: { ...counts, priorAuditEvents: auditCount, staffAccountsDeleted: staffIds.length } }], { session });
   });
   return res.json({ deleted: true, counts, staffAccountsDeleted: staffIds.length, auditEventsRemoved: auditCount });
-});
+}));
 
 export default router;

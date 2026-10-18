@@ -12,11 +12,13 @@ import { DepositTransaction } from '../models/DepositTransaction.js';
 import { ResidentMigration } from '../models/ResidentMigration.js';
 import { AuditEvent } from '../models/AuditEvent.js';
 import { requireAuth, requirePermission } from '../middleware/auth.js';
+import { residentIsInScope, scopedResidentIds, scopedRoomIds } from '../middleware/propertyAccess.js';
 import { inTransaction } from '../services/transactions.js';
-import { chargeStatus, dueDateForPeriod, paiseFromRupees, periodKeyFor } from '../services/billingRules.js';
+import { billingDayForDate, billingStartDateForPeriod, chargeStatus, dueDateForPeriod, paiseFromRupees, periodKeyFor } from '../services/billingRules.js';
 import { admitResident } from '../services/admissionService.js';
-import { chargeLedger, residentFinancialSummary } from '../services/financialCalculations.js';
+import { chargeLedger, residentFinancialSummary, rentChargeLedger } from '../services/financialCalculations.js';
 import { migrationOpeningPosition } from '../services/migrationAccounting.js';
+import { rentChargeMongoFilter, summarizeRentCharges } from '../services/rentStatus.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -31,13 +33,13 @@ function parseCsv(text: string): string[][] {
   row.push(cell); if (row.some((value) => value.trim())) rows.push(row); return rows;
 }
 const importHeaders = ['fullName','mobile','email','emergencyContact','governmentId','admissionDate','billingStartDate','roomNumber','bedId','monthlyRent','dueDay','securityDeposit','depositPaid','depositMethod','notes'];
-async function validateResidentCsv(csv: string) {
+async function validateResidentCsv(csv: string, allowedPropertyIds: string[] | null = null) {
   const matrix = parseCsv(csv); const headers = matrix.shift()?.map((header) => header.trim());
   if (!headers || importHeaders.some((header) => !headers.includes(header))) throw Object.assign(new Error(`CSV must include these columns: ${importHeaders.join(', ')}`), { status: 422 });
   const hash = createHash('sha256').update(csv).digest('hex'); const valid: { row: number; data: z.infer<typeof residentInput> }[] = []; const errors: { row: number; message: string }[] = [];
   for (const [index, cells] of matrix.entries()) {
     const record = Object.fromEntries(headers.map((header, position) => [header, cells[position]?.trim() ?? '']));
-    const room = await Room.findOne({ roomNumber: record.roomNumber, active: true }).select('_id');
+    const room = await Room.findOne({ roomNumber: record.roomNumber, active: true, ...(allowedPropertyIds === null ? {} : { propertyId: { $in: allowedPropertyIds } }) }).select('_id');
     const candidate = { ...record, roomId: room ? String(room._id) : '', monthlyRent: Number(record.monthlyRent), dueDay: Number(record.dueDay), securityDeposit: Number(record.securityDeposit || 0), depositPaid: Number(record.depositPaid || 0), depositMethod: record.depositMethod || 'CASH', idempotencyKey: `${hash.slice(0, 8)}-${String(index + 1).padStart(4, '0')}-4000-8000-${hash.slice(8, 20)}` };
     const parsed = residentInput.safeParse(candidate);
     if (!room) errors.push({ row: index + 2, message: `Room ${record.roomNumber || '(empty)'} was not found or is inactive.` });
@@ -49,7 +51,11 @@ async function validateResidentCsv(csv: string) {
 
 router.get('/rooms', requirePermission('rooms:read'), async (req, res) => {
   const filter: Record<string, unknown> = {};
-  if (req.query.propertyId && objectId.safeParse(req.query.propertyId).success) filter.propertyId = req.query.propertyId;
+  const requestedPropertyId = req.query.propertyId && objectId.safeParse(req.query.propertyId).success ? String(req.query.propertyId) : undefined;
+  if (requestedPropertyId) filter.propertyId = requestedPropertyId;
+  const roomScope = await scopedRoomIds(req, requestedPropertyId);
+  if (roomScope.forbidden) return res.status(403).json({ error: 'You do not have access to this property.' });
+  if (roomScope.ids !== null) filter._id = { $in: roomScope.ids };
   if (req.query.active === 'true') filter.active = true;
   if (req.query.active === 'false') filter.active = false;
   if (req.query.search) filter.roomNumber = { $regex: String(req.query.search).slice(0, 50), $options: 'i' };
@@ -64,6 +70,7 @@ router.post('/rooms', requirePermission('rooms:write'), async (req, res) => {
   const data = roomInput.parse(req.body);
   const property = data.propertyId ? await Property.findOne({ _id: data.propertyId, active: true }) : null;
   if (!property) return res.status(422).json({ error: 'Choose an active property before creating a room.' });
+  if (req.user?.role !== 'SUPER_ADMIN' && !(req.user?.propertyIds ?? []).includes(String(property._id))) return res.status(403).json({ error: 'You do not have access to this property.' });
   const beds = data.bedIds?.length ? data.bedIds : Array.from({ length: data.capacity }, (_, i) => String(i + 1));
   if (beds.length !== data.capacity || new Set(beds).size !== beds.length) return res.status(422).json({ error: 'Provide one unique bed identifier for each bed in the room capacity.' });
   let room;
@@ -76,8 +83,10 @@ router.put('/rooms/:id', requirePermission('rooms:write'), async (req, res) => {
   const data = roomInput.parse(req.body);
   const room = await Room.findById(req.params.id);
   if (!room) return res.status(404).json({ error: 'Room not found.' });
+  if (req.user?.role !== 'SUPER_ADMIN' && !(req.user?.propertyIds ?? []).includes(String(room.propertyId))) return res.status(403).json({ error: 'You do not have access to this property.' });
   const property = data.propertyId ? await Property.findOne({ _id: data.propertyId, active: true }) : null;
   if (!property) return res.status(422).json({ error: 'Choose an active property for this room.' });
+  if (req.user?.role !== 'SUPER_ADMIN' && !(req.user?.propertyIds ?? []).includes(String(property._id))) return res.status(403).json({ error: 'You do not have access to this property.' });
   const active = await RoomAllocation.countDocuments({ roomId: room._id, active: true });
   if (active && String(room.propertyId ?? '') !== String(property._id)) return res.status(409).json({ error: 'Move current residents before changing a room\'s property.' });
   if (data.capacity < active) return res.status(409).json({ error: 'Capacity cannot be lower than the number of current occupants.' });
@@ -93,6 +102,7 @@ router.put('/rooms/:id', requirePermission('rooms:write'), async (req, res) => {
 router.patch('/rooms/:id/deactivate', requirePermission('rooms:write'), async (req, res) => {
   const room = await Room.findById(req.params.id);
   if (!room) return res.status(404).json({ error: 'Room not found.' });
+  if (req.user?.role !== 'SUPER_ADMIN' && !(req.user?.propertyIds ?? []).includes(String(room.propertyId))) return res.status(403).json({ error: 'You do not have access to this property.' });
   if (await RoomAllocation.exists({ roomId: room._id, active: true })) return res.status(409).json({ error: 'Move residents before deactivating an occupied room.' });
   room.active = false; await room.save(); return res.json({ room });
 });
@@ -116,12 +126,41 @@ router.get('/residents', requirePermission('residents:read'), async (req, res) =
     const aggregates = await Charge.aggregate([{ $group: { _id: '$residentId', balance: { $sum: { $max: [0, { $subtract: ['$amountPaise', { $add: ['$paidPaise', { $ifNull: ['$externalPaidPaise', 0] }] }] }] } } } }, { $match: { balance: { $gt: 0 } } }]);
     const outstandingIds = aggregates.map((x) => x._id); if (req.query.outstanding === 'false') { const hasBalance = new Set(outstandingIds.map((id) => String(id))); const all = await Resident.distinct('_id', filter); filter._id = { $in: all.filter((id) => !hasBalance.has(String(id))) }; } else { const existingIds = (filter._id as { $in?: unknown[] } | undefined)?.$in; const existingSet = existingIds ? new Set(existingIds.map(String)) : null; filter._id = { $in: outstandingIds.filter((id) => !existingSet || existingSet.has(String(id))) }; }
   }
+  const rentPaymentStatus = String(req.query.rentStatus ?? req.query.rentPaymentStatus ?? '');
+  const rentStatus = rentPaymentStatus === 'PAID' ? 'CLEARED' : rentPaymentStatus;
+  const requestedPeriod = String(req.query.rentPeriod ?? periodKeyFor(new Date()));
+  const rentPeriod = requestedPeriod === 'all' || /^\d{4}-(0[1-9]|1[0-2])$/.test(requestedPeriod) ? requestedPeriod : periodKeyFor(new Date());
+  if (['CLEARED', 'OVERDUE', 'DUE_GRACE', 'UPCOMING', 'NO_BILL'].includes(rentStatus)) {
+    const rentFilter: Record<string, unknown> = { kind: 'RENT', ...(rentPeriod === 'all' ? {} : { periodKey: rentPeriod }) };
+    if (rentStatus === 'NO_BILL') {
+      const billedIds = new Set((await Charge.distinct('residentId', { kind: 'RENT', ...(rentPeriod === 'all' ? {} : { periodKey: rentPeriod }) })).map(String));
+      const candidates = await Resident.distinct('_id', filter);
+      filter._id = { $in: candidates.filter((residentId) => !billedIds.has(String(residentId))) };
+    }
+    const matchingIds = rentStatus === 'NO_BILL' ? [] : await Charge.distinct('residentId', { ...rentFilter, ...rentChargeMongoFilter(rentStatus as 'CLEARED' | 'OVERDUE' | 'DUE_GRACE' | 'UPCOMING') });
+    const existingIds = (filter._id as { $in?: unknown[] } | undefined)?.$in;
+    const existingSet = existingIds ? new Set(existingIds.map(String)) : null;
+    if (rentStatus !== 'NO_BILL') filter._id = { $in: matchingIds.filter((id) => !existingSet || existingSet.has(String(id))) };
+  }
+  const residentScope = await scopedResidentIds(req, req.query.propertyId && objectId.safeParse(req.query.propertyId).success ? String(req.query.propertyId) : undefined);
+  if (residentScope.forbidden) return res.status(403).json({ error: 'You do not have access to this property.' });
+  if (residentScope.ids !== null) {
+    const currentIds = (filter._id as { $in?: unknown[] } | undefined)?.$in;
+    const allowedIds = new Set(residentScope.ids.map(String));
+    filter._id = { $in: currentIds ? currentIds.filter((id) => allowedIds.has(String(id))) : residentScope.ids };
+  }
   const sortKey = String(req.query.sort ?? 'createdAt'); const sortField = ({ name: 'fullName', admissionDate: 'admissionDate', residentId: 'residentId', createdAt: 'createdAt' } as Record<string, string>)[sortKey] ?? 'createdAt'; const direction = req.query.direction === 'asc' ? 1 : -1;
   const [residents, total] = await Promise.all([Resident.find(filter).sort({ [sortField]: direction }).skip((page - 1) * limit).limit(limit).lean(), Resident.countDocuments(filter)]);
   const ids = residents.map((r) => r._id);
-  const [allocations, charges] = await Promise.all([RoomAllocation.find({ residentId: { $in: ids }, active: true }).populate('roomId', 'roomNumber roomType').lean(), Charge.aggregate([{ $match: { residentId: { $in: ids } } }, { $group: { _id: '$residentId', outstandingPaise: { $sum: { $max: [0, { $subtract: ['$amountPaise', { $add: ['$paidPaise', { $ifNull: ['$externalPaidPaise', 0] }] }] }] } } } }])]);
+  const [allocations, charges, periodCharges] = await Promise.all([RoomAllocation.find({ residentId: { $in: ids }, active: true }).populate({ path: 'roomId', select: 'roomNumber roomType propertyId propertyName' }).lean(), Charge.aggregate([{ $match: { residentId: { $in: ids } } }, { $group: { _id: '$residentId', outstandingPaise: { $sum: { $max: [0, { $subtract: ['$amountPaise', { $add: ['$paidPaise', { $ifNull: ['$externalPaidPaise', 0] }] }] }] } } } }]), Charge.find({ residentId: { $in: ids }, kind: 'RENT', ...(rentPeriod === 'all' ? {} : { periodKey: rentPeriod }) }).sort({ dueAt: 1 }).lean()]);
   const allocMap = new Map(allocations.map((a) => [String(a.residentId), a])); const balanceMap = new Map(charges.map((c) => [String(c._id), c.outstandingPaise]));
-  return res.json({ residents: residents.map((r) => ({ ...r, currentAllocation: allocMap.get(String(r._id)) ?? null, outstandingPaise: balanceMap.get(String(r._id)) ?? 0, currentRentPaise: [...r.rentSchedules].sort((a, b) => b.effectiveFrom.getTime() - a.effectiveFrom.getTime())[0]?.monthlyRentPaise ?? 0 })), page, limit, total, pages: Math.ceil(total / limit) });
+  const periodChargeMap = new Map<string, typeof periodCharges>();
+  for (const charge of periodCharges) { const key = String(charge.residentId); periodChargeMap.set(key, [...(periodChargeMap.get(key) ?? []), charge]); }
+  const now = new Date();
+  return res.json({ residents: residents.map((r) => {
+    const residentCharges = periodChargeMap.get(String(r._id)) ?? [];
+    return { ...r, currentAllocation: allocMap.get(String(r._id)) ?? null, outstandingPaise: balanceMap.get(String(r._id)) ?? 0, currentRentPaise: [...r.rentSchedules].sort((a, b) => b.effectiveFrom.getTime() - a.effectiveFrom.getTime())[0]?.monthlyRentPaise ?? 0, rentSummary: summarizeRentCharges(residentCharges, now), rentPeriod };
+  }), page, limit, total, pages: Math.ceil(total / limit) });
 });
 
 router.get('/imports/residents/template', requirePermission('residents:read'), (_req, res) => {
@@ -129,11 +168,11 @@ router.get('/imports/residents/template', requirePermission('residents:read'), (
   return res.send(`${importHeaders.join(',')}\r\nExample Resident,+919876543210,,,,2026-10-01,2026-10-01,101,1,8500,5,10000,0,CASH,`);
 });
 router.post('/imports/residents/preview', requirePermission('residents:write'), async (req, res) => {
-  const { csv } = z.object({ csv: z.string().min(1).max(1_500_000) }).parse(req.body); const result = await validateResidentCsv(csv);
+  const { csv } = z.object({ csv: z.string().min(1).max(1_500_000) }).parse(req.body); const result = await validateResidentCsv(csv, req.user?.role === 'SUPER_ADMIN' ? null : req.user?.propertyIds ?? []);
   return res.json({ previewId: result.hash, rows: result.valid.map(({ row, data }) => ({ row, fullName: data.fullName, mobile: data.mobile, roomId: data.roomId, bedId: data.bedId, monthlyRent: data.monthlyRent, billingStartDate: data.billingStartDate })), errors: result.errors, validCount: result.valid.length, errorCount: result.errors.length });
 });
 router.post('/imports/residents/commit', requirePermission('residents:write'), async (req, res) => {
-  const { csv, previewId } = z.object({ csv: z.string().min(1).max(1_500_000), previewId: z.string().length(64) }).parse(req.body); const result = await validateResidentCsv(csv);
+  const { csv, previewId } = z.object({ csv: z.string().min(1).max(1_500_000), previewId: z.string().length(64) }).parse(req.body); const result = await validateResidentCsv(csv, req.user?.role === 'SUPER_ADMIN' ? null : req.user?.propertyIds ?? []);
   if (result.hash !== previewId) return res.status(409).json({ error: 'The selected CSV changed after preview. Preview it again before importing.' });
   let inserted = 0; let skipped = 0; const failures = [...result.errors];
   for (const row of result.valid) {
@@ -145,6 +184,9 @@ router.post('/imports/residents/commit', requirePermission('residents:write'), a
 
 router.post('/residents', requirePermission('residents:write'), async (req, res) => {
   const data = residentInput.parse(req.body);
+  const targetRoom = await Room.findById(data.roomId).select('propertyId').lean();
+  if (!targetRoom) return res.status(422).json({ error: 'Choose an active room and bed.' });
+  if (req.user?.role !== 'SUPER_ADMIN' && !(req.user?.propertyIds ?? []).includes(String(targetRoom.propertyId ?? ''))) return res.status(403).json({ error: 'You do not have access to this property.' });
   try {
     const result = await admitResident(data, req.user!.id);
     return res.status(result.duplicate ? 200 : 201).json(result);
@@ -159,6 +201,7 @@ router.post('/residents', requirePermission('residents:write'), async (req, res)
 router.get('/residents/:id', requirePermission('residents:read'), async (req, res) => {
   const resident = await Resident.findById(req.params.id).lean();
   if (!resident) return res.status(404).json({ error: 'Resident not found.' });
+  if (!await residentIsInScope(req, String(resident._id))) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
   const [allocations, charges, payments, deposits, messages, audit, migration] = await Promise.all([
     RoomAllocation.find({ residentId: resident._id }).populate('roomId', 'roomNumber roomType').sort({ startDate: -1 }).lean(),
     Charge.find({ residentId: resident._id }).sort({ dueAt: -1 }).lean(),
@@ -168,9 +211,10 @@ router.get('/residents/:id', requirePermission('residents:read'), async (req, re
     AuditEvent.find({ entityType: 'Resident', entityId: String(resident._id) }).sort({ createdAt: -1 }).limit(100).lean(),
     ResidentMigration.findOne({ residentId: resident._id }).lean(),
   ]);
-  const ledger = charges.map((c) => ({ ...c, ...chargeLedger(c) }));
+  const ledger = charges.map((c) => ({ ...c, ...(c.kind === 'RENT' ? rentChargeLedger(c) : chargeLedger(c)) }));
   const summary = residentFinancialSummary(charges);
-  return res.json({ resident, migration, allocations, charges: ledger, payments: payments.map((payment) => ({ ...payment, allocatedPaise: payment.reversedAt ? 0 : payment.allocations.reduce((sum, allocation) => sum + allocation.amountPaise, 0), unallocatedPaise: payment.reversedAt ? 0 : payment.amountPaise - payment.allocations.reduce((sum, allocation) => sum + allocation.amountPaise, 0) })), deposits, messages, audit, outstandingPaise: summary.outstandingPaise, overduePaise: summary.overdueRentPaise, pendingUtilityPaise: summary.pendingUtilityPaise, depositBalancePaise: deposits.reduce((sum, deposit) => sum + (deposit.kind === 'RECEIVED' ? deposit.amountPaise : deposit.kind === 'REFUNDED' ? -deposit.amountPaise : 0), 0) });
+  const currentRentSummary = summarizeRentCharges(charges.filter((charge) => charge.kind === 'RENT' && charge.periodKey === periodKeyFor(new Date())));
+  return res.json({ resident, migration, allocations, charges: ledger, payments: payments.map((payment) => ({ ...payment, allocatedPaise: payment.reversedAt ? 0 : payment.allocations.reduce((sum, allocation) => sum + allocation.amountPaise, 0), unallocatedPaise: payment.reversedAt ? 0 : payment.amountPaise - payment.allocations.reduce((sum, allocation) => sum + allocation.amountPaise, 0) })), deposits, messages, audit, outstandingPaise: summary.outstandingPaise, overduePaise: summary.overdueRentPaise, rentOutstandingPaise: summary.rentOutstandingPaise, openingBalanceOutstandingPaise: summary.openingBalanceOutstandingPaise, rentSummary: currentRentSummary, pendingUtilityPaise: summary.pendingUtilityPaise, depositBalancePaise: deposits.reduce((sum, deposit) => sum + (deposit.kind === 'RECEIVED' ? deposit.amountPaise : deposit.kind === 'REFUNDED' ? -deposit.amountPaise : 0), 0) });
 });
 
 const migrationFields = z.object({ goLiveDate: date, monthlyRent: z.number().positive().max(10000000), dueDay: z.number().int().min(1).max(31), openingArrears: z.number().min(0).max(10000000).default(0), prepaidRent: z.number().min(0).max(10000000).default(0), currentPeriodSettled: z.number().min(0).max(10000000).default(0), securityDepositHeld: z.number().min(0).max(10000000).default(0), source: z.string().trim().min(2).max(160), description: z.string().trim().min(5).max(500), depositMethod: z.enum(['CASH', 'BANK_TRANSFER', 'UPI', 'OTHER']).default('CASH') });
@@ -180,6 +224,7 @@ const migrationInput = migrationFields.superRefine(validateMigrationAmounts);
 router.post('/residents/:id/migration-preview', requirePermission('billing:write'), async (req, res) => {
   const data = migrationInput.parse(req.body); const resident = await Resident.findById(req.params.id).lean();
   if (!resident) return res.status(404).json({ error: 'Resident not found.' });
+  if (!await residentIsInScope(req, String(resident._id))) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
   const goLiveDate = data.goLiveDate; const periodKey = periodKeyFor(goLiveDate); const rentPaise = paiseFromRupees(data.monthlyRent, true);
   const existingMigration = await ResidentMigration.findOne({ residentId: resident._id }).lean();
   const [existingCharge, existingDepositTransactions, currentCharges] = await Promise.all([
@@ -189,12 +234,13 @@ router.post('/residents/:id/migration-preview', requirePermission('billing:write
   ]);
   const depositLedgerPaise = existingDepositTransactions.reduce((sum, item) => sum + (item.kind === 'RECEIVED' ? item.amountPaise : item.kind === 'REFUNDED' ? -item.amountPaise : 0), 0);
   const openingPosition = migrationOpeningPosition(paiseFromRupees(data.openingArrears, true), paiseFromRupees(data.prepaidRent, true));
-  return res.json({ preview: { resident: { id: String(resident._id), residentId: resident.residentId, fullName: resident.fullName, admissionDate: resident.admissionDate, billingStartDate: resident.billingStartDate }, goLiveDate, periodKey, monthlyRentPaise: rentPaise, dueDay: data.dueDay, ...openingPosition, currentPeriodSettledPaise: paiseFromRupees(data.currentPeriodSettled, true), securityDepositHeldPaise: paiseFromRupees(data.securityDepositHeld, true), projectedOpeningNetPaise: openingPosition.openingBalancePaise, existingMigration: Boolean(existingMigration), existingPeriodCharge: existingCharge ? { id: String(existingCharge._id), amountPaise: existingCharge.amountPaise, paidPaise: existingCharge.paidPaise, kind: existingCharge.kind } : null, depositLedgerPaise, depositMatches: !existingDepositTransactions.length || depositLedgerPaise === paiseFromRupees(data.securityDepositHeld, true), depositWillBeRecorded: !existingDepositTransactions.length && paiseFromRupees(data.securityDepositHeld, true) > 0, recentCharges: currentCharges.map((charge) => ({ id: String(charge._id), kind: charge.kind, periodKey: charge.periodKey, amountPaise: charge.amountPaise, paidPaise: charge.paidPaise, description: charge.description })) } });
+  return res.json({ preview: { resident: { id: String(resident._id), residentId: resident.residentId, fullName: resident.fullName, admissionDate: resident.admissionDate, billingStartDate: resident.billingStartDate }, goLiveDate, periodKey, monthlyRentPaise: rentPaise, dueDay: billingDayForDate(resident.admissionDate), ...openingPosition, currentPeriodSettledPaise: paiseFromRupees(data.currentPeriodSettled, true), securityDepositHeldPaise: paiseFromRupees(data.securityDepositHeld, true), projectedOpeningNetPaise: openingPosition.openingBalancePaise, existingMigration: Boolean(existingMigration), existingPeriodCharge: existingCharge ? { id: String(existingCharge._id), amountPaise: existingCharge.amountPaise, paidPaise: existingCharge.paidPaise, kind: existingCharge.kind } : null, depositLedgerPaise, depositMatches: !existingDepositTransactions.length || depositLedgerPaise === paiseFromRupees(data.securityDepositHeld, true), depositWillBeRecorded: !existingDepositTransactions.length && paiseFromRupees(data.securityDepositHeld, true) > 0, recentCharges: currentCharges.map((charge) => ({ id: String(charge._id), kind: charge.kind, periodKey: charge.periodKey, amountPaise: charge.amountPaise, paidPaise: charge.paidPaise, description: charge.description })) } });
 });
 
 router.post('/residents/:id/migration', requirePermission('billing:write'), async (req, res) => {
   const data = migrationFields.extend({ confirmed: z.literal(true) }).superRefine(validateMigrationAmounts).parse(req.body);
   const resident = await Resident.findById(req.params.id); if (!resident) return res.status(404).json({ error: 'Resident not found.' });
+  if (!await residentIsInScope(req, String(resident._id))) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
   const goLiveDate = data.goLiveDate; const periodKey = periodKeyFor(goLiveDate); const rentPaise = paiseFromRupees(data.monthlyRent, true);
   const arrearsPaise = paiseFromRupees(data.openingArrears, true); const prepaidPaise = paiseFromRupees(data.prepaidRent, true); const currentSettledPaise = paiseFromRupees(data.currentPeriodSettled, true); const depositHeldPaise = paiseFromRupees(data.securityDepositHeld, true);
   const openingPosition = migrationOpeningPosition(arrearsPaise, prepaidPaise);
@@ -215,10 +261,12 @@ router.post('/residents/:id/migration', requirePermission('billing:write'), asyn
         await AuditEvent.create([{ actorId: req.user!.id, action: 'EXTERNAL_RENT_SETTLEMENT_RECORDED', entityType: 'Charge', entityId: String(existingCharge._id), reason: data.description, details: { source: data.source, periodKey, amountPaise: currentSettledPaise } }], { session });
       }
       const prepaidAppliedToArrearsPaise = openingPosition.prepaidAppliedToArrearsPaise;
-      const migration = (await ResidentMigration.create([{ residentId: resident._id, goLiveDate, periodKey, monthlyRentPaise: rentPaise, dueDay: data.dueDay, openingArrearsPaise: arrearsPaise, prepaidRentPaise: prepaidPaise, currentPeriodSettledPaise: currentSettledPaise, creditRemainingPaise: openingPosition.creditRemainingPaise, securityDepositHeldPaise: depositHeldPaise, source: data.source, description: data.description, createdBy: req.user!.id }], { session }))[0]!;
-      resident.billingStartDate = goLiveDate;
+      const dueDay = billingDayForDate(resident.admissionDate);
+      const billingStartDate = billingStartDateForPeriod(periodKey, dueDay);
+      const migration = (await ResidentMigration.create([{ residentId: resident._id, goLiveDate, periodKey, monthlyRentPaise: rentPaise, dueDay, openingArrearsPaise: arrearsPaise, prepaidRentPaise: prepaidPaise, currentPeriodSettledPaise: currentSettledPaise, creditRemainingPaise: openingPosition.creditRemainingPaise, securityDepositHeldPaise: depositHeldPaise, source: data.source, description: data.description, createdBy: req.user!.id }], { session }))[0]!;
+      resident.billingStartDate = billingStartDate;
       resident.securityDepositPaise = depositHeldPaise;
-      resident.rentSchedules.push({ version: (resident.rentSchedules.at(-1)?.version ?? 0) + 1, monthlyRentPaise: rentPaise, dueDay: data.dueDay, effectiveFrom: goLiveDate, changedBy: new Types.ObjectId(req.user!.id), reason: `Migration at ${periodKey}` });
+      resident.rentSchedules.push({ version: (resident.rentSchedules.at(-1)?.version ?? 0) + 1, monthlyRentPaise: rentPaise, dueDay, effectiveFrom: billingStartDate, changedBy: new Types.ObjectId(req.user!.id), reason: `Migration at ${periodKey}` });
       await resident.save({ session });
       if (arrearsPaise > 0) {
         const [charge] = await Charge.create([{ residentId: resident._id, kind: 'OPENING_BALANCE', periodKey: `OPENING-${periodKey}`, description: `Opening rent arrears as of ${goLiveDate.toISOString().slice(0, 10)}: ${data.description}`, amountPaise: arrearsPaise, paidPaise: 0, externalPaidPaise: prepaidAppliedToArrearsPaise, status: chargeStatus(arrearsPaise, prepaidAppliedToArrearsPaise, goLiveDate), issuedAt: new Date(), dueAt: goLiveDate, idempotencyKey: `opening:${resident._id}`, createdBy: req.user!.id, audit: [{ at: new Date(), by: req.user!.id, action: 'OPENING_BALANCE_POSTED', reason: `${data.source}: ${data.description}`, afterPaise: arrearsPaise }, ...(prepaidAppliedToArrearsPaise ? [{ at: new Date(), by: req.user!.id, action: 'PREPAID_CREDIT_APPLIED', reason: `Applied verified prepaid rent from ${data.source}`, beforePaise: arrearsPaise, afterPaise: arrearsPaise - prepaidAppliedToArrearsPaise }] : [])] }], { session });
@@ -237,8 +285,10 @@ router.put('/residents/:id', requirePermission('residents:write'), async (req, r
   if (data.effectiveFrom < nextPeriodStart || data.effectiveFrom.getUTCDate() !== 1) return res.status(422).json({ error: 'Rent schedule changes must start on the first day of a future billing period. Previously issued charges are never rewritten.' });
   const [resident, targetRoom] = await Promise.all([Resident.findById(req.params.id), Room.findOne({ _id: req.body.roomId, active: true })]);
   if (!resident) return res.status(404).json({ error: 'Resident not found.' });
+  if (!await residentIsInScope(req, String(resident._id))) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
   if (!targetRoom || !targetRoom.beds.some((b) => b.bedId === data.bedId && b.active)) return res.status(422).json({ error: 'Select an active room and bed.' });
-  const rentPaise = paiseFromRupees(data.monthlyRent); const changedRent = resident.rentSchedules.at(-1)?.monthlyRentPaise !== rentPaise || resident.rentSchedules.at(-1)?.dueDay !== data.dueDay;
+  if (req.user?.role !== 'SUPER_ADMIN' && !(req.user?.propertyIds ?? []).includes(String(targetRoom.propertyId ?? ''))) return res.status(403).json({ error: 'You do not have access to the destination property.' });
+  const rentPaise = paiseFromRupees(data.monthlyRent); const dueDay = billingDayForDate(resident.admissionDate); const changedRent = resident.rentSchedules.at(-1)?.monthlyRentPaise !== rentPaise || resident.rentSchedules.at(-1)?.dueDay !== dueDay;
   const current = await RoomAllocation.findOne({ residentId: resident._id, active: true });
   const changedRoom = !current || String(current.roomId) !== String(targetRoom._id) || current.bedId !== data.bedId;
   try {
@@ -249,7 +299,7 @@ router.put('/residents/:id', requirePermission('residents:write'), async (req, r
         await RoomAllocation.create([{ residentId: resident._id, roomId: targetRoom._id, bedId: data.bedId, startDate: data.effectiveFrom, changedBy: req.user!.id, reason: 'Resident room transfer' }], { session });
         resident.allocations.push({ roomId: targetRoom._id, roomNumber: targetRoom.roomNumber, bedId: data.bedId, startDate: data.effectiveFrom, changedBy: new Types.ObjectId(req.user!.id), reason: 'Resident room transfer' });
       }
-      if (changedRent) resident.rentSchedules.push({ version: (resident.rentSchedules.at(-1)?.version ?? 0) + 1, monthlyRentPaise: rentPaise, dueDay: data.dueDay, effectiveFrom: data.effectiveFrom, changedBy: new Types.ObjectId(req.user!.id), reason: 'Schedule edited by operator' });
+      if (changedRent) resident.rentSchedules.push({ version: (resident.rentSchedules.at(-1)?.version ?? 0) + 1, monthlyRentPaise: rentPaise, dueDay, effectiveFrom: data.effectiveFrom, changedBy: new Types.ObjectId(req.user!.id), reason: 'Schedule edited by operator' });
       resident.set({ fullName: data.fullName, mobile: data.mobile, email: data.email.toLowerCase(), emergencyContact: data.emergencyContact, governmentId: data.governmentId, notes: data.notes });
       await resident.save({ session });
       await AuditEvent.create([{ actorId: req.user!.id, action: changedRoom ? 'ROOM_TRANSFER' : changedRent ? 'RENT_SCHEDULE_CHANGED' : 'RESIDENT_UPDATED', entityType: 'Resident', entityId: String(resident._id), reason: changedRent ? 'Schedule updated; historical charges remain unchanged.' : '', details: { changedRent, changedRoom, effectiveFrom: data.effectiveFrom } }], { session });
@@ -261,6 +311,7 @@ router.put('/residents/:id', requirePermission('residents:write'), async (req, r
 router.patch('/residents/:id/status', requirePermission('residents:write'), async (req, res) => {
   const data = z.object({ status: z.enum(['ACTIVE', 'NOTICE', 'INACTIVE']), noticeStartDate: date.optional(), expectedDepartureDate: date.optional(), effectiveEndDate: date.optional(), reason: z.string().max(500).default('') }).parse(req.body);
   const resident = await Resident.findById(req.params.id); if (!resident) return res.status(404).json({ error: 'Resident not found.' });
+  if (!await residentIsInScope(req, String(resident._id))) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
   if (data.status === 'ACTIVE' && resident.status === 'INACTIVE') return res.status(409).json({ error: 'A checked-out resident needs a new room allocation before reactivation.' });
   await inTransaction(async (session) => {
     resident.status = data.status;
@@ -281,8 +332,11 @@ router.patch('/residents/:id/status', requirePermission('residents:write'), asyn
 
 router.get('/residents/:id/preview-rent', requirePermission('residents:read'), async (req, res) => {
   const data = z.object({ billingStartDate: date, dueDay: z.coerce.number().int().min(1).max(31), monthlyRent: z.coerce.number().positive() }).parse(req.query);
+  const resident = await Resident.findById(req.params.id).select('admissionDate').lean();
+  if (!resident) return res.status(404).json({ error: 'Resident not found.' });
+  if (!await residentIsInScope(req, String(req.params.id))) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
   const periodKey = periodKeyFor(data.billingStartDate);
-  return res.json({ policy: 'FULL_MONTH', periodKey, amountPaise: paiseFromRupees(data.monthlyRent), dueAt: dueDateForPeriod(periodKey, data.dueDay) });
+  return res.json({ policy: 'FULL_MONTH', periodKey, amountPaise: paiseFromRupees(data.monthlyRent), dueAt: dueDateForPeriod(periodKey, billingDayForDate(resident.admissionDate)) });
 });
 
 export default router;

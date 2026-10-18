@@ -11,7 +11,8 @@
     "lint": "eslint src --ext .ts",
     "test": "vitest run",
     "bootstrap:admin": "tsx src/scripts/bootstrapAdmin.ts",
-    "migrate:property-room-index": "tsx src/scripts/migratePropertyRoomIndex.ts"
+    "migrate:property-room-index": "tsx src/scripts/migratePropertyRoomIndex.ts",
+    "migrate:admission-due-days": "tsx src/scripts/migrateAdmissionDueDays.ts"
   },
   "dependencies": {
     "argon2": "^0.41.1",

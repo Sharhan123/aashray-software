@@ -12,3 +12,11 @@ client/.vite/
 server/.data/
 
 .vercel
+**/local.properties
+android/keystore.properties
+android/*.jks
+android/*.keystore
+android/.gradle/
+android/.gradle-user*/
+android/.android-user/
+android/**/build/

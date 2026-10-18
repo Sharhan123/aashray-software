@@ -7,7 +7,7 @@ import { authenticate, revokeSession } from '../services/authService.js';
 
 const credentialsSchema = z.object({ email: z.string().trim().email().max(254), password: z.string().min(1).max(200) });
 const cookieOptions = { secure: env.COOKIE_SECURE === 'true' || isProduction, sameSite: env.COOKIE_SAME_SITE, path: '/' as const };
-const publicUser = (user: { id?: string; _id?: { toString(): string }; name: string; email: string; role: string; permissions: readonly string[] }) => ({ id: user.id ?? user._id?.toString() ?? '', name: user.name, email: user.email, role: user.role, permissions: user.permissions });
+const publicUser = (user: { id?: string; _id?: { toString(): string }; name: string; email: string; role: string; permissions: readonly string[]; propertyIds?: readonly { toString(): string }[] }) => ({ id: user.id ?? user._id?.toString() ?? '', name: user.name, email: user.email, role: user.role, permissions: user.permissions, propertyIds: (user.propertyIds ?? []).map(String) });
 
 export function csrf(_req: Request, res: Response) {
   const token = randomBytes(24).toString('base64url');

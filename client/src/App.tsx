@@ -10,7 +10,7 @@ export function App() {
   const { state } = useAuth();
   if (state.status === 'loading') return <LoadingScreen />;
   return <Routes>
-    <Route path="/login" element={state.status === 'authenticated' ? <Navigate to="/" replace /> : <LoginPage />} />
+    <Route path="/login" element={state.status === 'authenticated' ? <Navigate to="/dashboard" replace /> : <LoginPage />} />
     <Route element={<ProtectedRoute />}><Route element={<AppShell />}>
       <Route index element={<PropertiesPage />} />
       <Route path="dashboard" element={<DashboardLivePage />} />

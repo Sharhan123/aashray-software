@@ -16,6 +16,7 @@ const userSchema = new Schema({
   role: { type: String, enum: ['SUPER_ADMIN', 'STAFF'], required: true },
   active: { type: Boolean, default: true, index: true },
   permissions: { type: [String], enum: STAFF_PERMISSIONS, default: [] },
+  propertyIds: { type: [Schema.Types.ObjectId], ref: 'Property', default: [] },
   lastLoginAt: { type: Date, default: null },
 }, { timestamps: true, versionKey: false });
 userSchema.index({ role: 1 }, { unique: true, partialFilterExpression: { role: 'SUPER_ADMIN' }, name: 'single_super_admin' });

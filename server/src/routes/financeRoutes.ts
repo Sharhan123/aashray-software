@@ -13,8 +13,10 @@ import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { inTransaction } from '../services/transactions.js';
 import { chargeStatus, paiseFromRupees } from '../services/billingRules.js';
 import { validatePaymentAllocations } from '../services/paymentRules.js';
-import { chargeLedger } from '../services/financialCalculations.js';
+import { chargeLedger, rentChargeLedger } from '../services/financialCalculations.js';
+import { rentChargeMongoFilter } from '../services/rentStatus.js';
 import { previewMonthlyBilling, generateMonthlyBilling } from '../services/billingService.js';
+import { residentIsInScope, scopedResidentIds } from '../middleware/propertyAccess.js';
 
 const router = Router(); router.use(requireAuth);
 const id = z.string().regex(/^[a-f\d]{24}$/i); const day = z.coerce.date();
@@ -28,15 +30,19 @@ router.get('/charges', requirePermission('billing:read'), async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1); const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25));
   const filter: Record<string, unknown> = {};
   if (req.query.residentId && id.safeParse(req.query.residentId).success) filter.residentId = req.query.residentId;
-  if (req.query.propertyId && id.safeParse(req.query.propertyId).success) {
-    const roomIds = await Room.distinct('_id', { propertyId: req.query.propertyId });
-    const residentIds = await RoomAllocation.distinct('residentId', { active: true, roomId: { $in: roomIds } });
-    filter.residentId = { $in: residentIds };
-  }
+  const requestedPropertyId = req.query.propertyId && id.safeParse(req.query.propertyId).success ? String(req.query.propertyId) : undefined;
+  const scope = await scopedResidentIds(req, requestedPropertyId);
+  if (scope.forbidden) return res.status(403).json({ error: 'You do not have access to this property.' });
+  if (scope.ids !== null) { const current = filter.residentId; filter.residentId = { $in: current ? scope.ids.filter((residentId) => String(residentId) === String(current)) : scope.ids }; }
   if (req.query.kind === 'RENT' || req.query.kind === 'UTILITY' || req.query.kind === 'OPENING_BALANCE') filter.kind = req.query.kind;
   if (req.query.period) { const period = String(req.query.period).slice(0, 7); filter.periodKey = { $in: [period, `OPENING-${period}`] }; }
   const now = new Date();
-  if (req.query.status === 'OVERDUE') filter.$expr = { $and: [{ $lt: ['$dueAt', now] }, { $lt: [{ $add: ['$paidPaise', { $ifNull: ['$externalPaidPaise', 0] }] }, '$amountPaise'] }] };
+  if (req.query.rentStatus && ['CLEARED', 'OVERDUE', 'DUE_GRACE', 'UPCOMING'].includes(String(req.query.rentStatus))) {
+    filter.kind = 'RENT'; Object.assign(filter, rentChargeMongoFilter(String(req.query.rentStatus) as 'CLEARED' | 'OVERDUE' | 'DUE_GRACE' | 'UPCOMING', now));
+  } else if (req.query.status === 'OVERDUE') filter.$or = [
+    { kind: 'RENT', ...rentChargeMongoFilter('OVERDUE', now) },
+    { kind: { $ne: 'RENT' }, dueAt: { $lt: now }, $expr: { $lt: [{ $add: ['$paidPaise', { $ifNull: ['$externalPaidPaise', 0] }] }, '$amountPaise'] } },
+  ];
   else if (req.query.status === 'PENDING') filter.$expr = { $and: [{ $gte: ['$dueAt', now] }, { $eq: [{ $add: ['$paidPaise', { $ifNull: ['$externalPaidPaise', 0] }] }, 0] }] };
   else if (req.query.status === 'PARTIAL') filter.$expr = { $and: [{ $gte: ['$dueAt', now] }, { $gt: [{ $add: ['$paidPaise', { $ifNull: ['$externalPaidPaise', 0] }] }, 0] }, { $lt: [{ $add: ['$paidPaise', { $ifNull: ['$externalPaidPaise', 0] }] }, '$amountPaise'] }] };
   else if (req.query.status === 'PAID') filter.$expr = { $gte: [{ $add: ['$paidPaise', { $ifNull: ['$externalPaidPaise', 0] }] }, '$amountPaise'] };
@@ -45,7 +51,7 @@ router.get('/charges', requirePermission('billing:read'), async (req, res) => {
     const rows = await Charge.find(filter).populate('residentId', 'residentId fullName').sort({ dueAt: -1 }).limit(10000).lean();
     const columns = ['residentId', 'resident', 'kind', 'description', 'periodKey', 'dueAt', 'amountPaise', 'paidPaise', 'externalPaidPaise', 'balancePaise', 'status'];
     const escape = (value: unknown) => `"${String(value ?? '').replace(/[=+@]/g, (ch, index) => index === 0 ? `'${ch}` : ch).replaceAll('"', '""')}"`;
-    const csv = [columns.map(escape).join(','), ...rows.map((charge) => { const resident = charge.residentId as unknown as { residentId?: string; fullName?: string } | null; const ledger = chargeLedger(charge); const record: Record<string, unknown> = { residentId: resident?.residentId, resident: resident?.fullName, kind: charge.kind, description: charge.description, periodKey: charge.periodKey, dueAt: charge.dueAt.toISOString(), amountPaise: charge.amountPaise, paidPaise: charge.paidPaise, externalPaidPaise: charge.externalPaidPaise ?? 0, balancePaise: ledger.balancePaise, status: ledger.status }; return columns.map((column) => escape(record[column])).join(','); })].join('\r\n');
+    const csv = [columns.map(escape).join(','), ...rows.map((charge) => { const resident = charge.residentId as unknown as { residentId?: string; fullName?: string } | null; const ledger = charge.kind === 'RENT' ? rentChargeLedger(charge) : chargeLedger(charge); const record: Record<string, unknown> = { residentId: resident?.residentId, resident: resident?.fullName, kind: charge.kind, description: charge.description, periodKey: charge.periodKey, dueAt: charge.dueAt.toISOString(), amountPaise: charge.amountPaise, paidPaise: charge.paidPaise, externalPaidPaise: charge.externalPaidPaise ?? 0, balancePaise: ledger.balancePaise, status: ledger.status }; return columns.map((column) => escape(record[column])).join(','); })].join('\r\n');
     res.type('text/csv'); res.setHeader('Content-Disposition', 'attachment; filename="aashray-charges.csv"'); return res.send(csv);
   }
   const [charges, total] = await Promise.all([Charge.find(filter).populate('residentId', 'residentId fullName mobile').sort({ dueAt: -1 }).skip((page - 1) * limit).limit(limit).lean(), Charge.countDocuments(filter)]);
@@ -59,12 +65,14 @@ router.get('/charges', requirePermission('billing:read'), async (req, res) => {
       paymentsByCharge.set(key, entries);
     }
   }
-  return res.json({ charges: charges.map((c) => ({ ...c, ...chargeLedger(c), paymentHistory: paymentsByCharge.get(String(c._id)) ?? [] })), page, limit, total, pages: Math.ceil(total / limit) });
+  return res.json({ charges: charges.map((c) => ({ ...c, ...(c.kind === 'RENT' ? rentChargeLedger(c) : chargeLedger(c)), paymentHistory: paymentsByCharge.get(String(c._id)) ?? [] })), page, limit, total, pages: Math.ceil(total / limit) });
 });
 
 router.post('/utilities', requirePermission('utilities:write'), async (req, res) => {
   const data = z.object({ residentId: id, propertyId: id.optional(), utilityType: z.string().trim().min(2).max(60), periodKey: z.string().regex(/^\d{4}-\d{2}$/), amount: z.number().positive().max(10000000), issuedAt: day, dueAt: day, notes: z.string().max(1000).default(''), idempotencyKey: z.string().uuid() }).parse(req.body);
   if (!await Resident.exists({ _id: data.residentId })) return res.status(404).json({ error: 'Resident not found.' });
+  if (!await residentIsInScope(req, data.residentId)) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
+  if (data.propertyId && req.user?.role !== 'SUPER_ADMIN' && !(req.user?.propertyIds ?? []).includes(data.propertyId)) return res.status(403).json({ error: 'You do not have access to this property.' });
   if (data.propertyId) { const property = await Property.findOne({ _id: data.propertyId, active: true }); const roomIds = await Room.distinct('_id', { propertyId: data.propertyId }); if (!property || !await RoomAllocation.exists({ residentId: data.residentId, roomId: { $in: roomIds }, active: true })) return res.status(422).json({ error: 'Choose a resident currently assigned to this property.' }); }
   const utilityIdempotencyKey = `utility:${data.idempotencyKey}`;
   const duplicateRequest = await Charge.findOne({ idempotencyKey: utilityIdempotencyKey });
@@ -82,6 +90,7 @@ router.post('/utilities', requirePermission('utilities:write'), async (req, res)
 
 router.post('/deposits', requirePermission('payments:write'), async (req, res) => {
   const data = z.object({ residentId: id, amount: z.number().positive().max(10000000), kind: z.enum(['RECEIVED', 'REFUNDED']), paymentMethod: z.enum(['CASH', 'BANK_TRANSFER', 'UPI', 'OTHER']), reference: z.string().max(120).default(''), reason: z.string().trim().min(5).max(1000), idempotencyKey: z.string().uuid() }).parse(req.body);
+  if (!await residentIsInScope(req, data.residentId)) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
   const amountPaise = paiseFromRupees(data.amount);
   const result = await inTransaction(async (session) => {
     const resident = await Resident.findById(data.residentId).session(session); if (!resident) throw Object.assign(new Error('Resident not found.'), { status: 404 });
@@ -100,14 +109,18 @@ router.post('/deposits', requirePermission('payments:write'), async (req, res) =
 
 router.post('/billing/preview', requirePermission('billing:write'), async (req, res) => {
   const { periodKey, propertyId } = z.object({ periodKey: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/), propertyId: id.optional() }).parse(req.body);
+  if (propertyId && req.user?.role !== 'SUPER_ADMIN' && !(req.user?.propertyIds ?? []).includes(propertyId)) return res.status(403).json({ error: 'You do not have access to this property.' });
   if (propertyId && !await Property.exists({ _id: propertyId, active: true })) return res.status(404).json({ error: 'Active property not found.' });
-  return res.json({ periodKey, propertyId: propertyId ?? null, ...(await previewMonthlyBilling(periodKey, propertyId)) });
+  const assigned = req.user?.role === 'SUPER_ADMIN' ? undefined : req.user?.propertyIds ?? [];
+  return res.json({ periodKey, propertyId: propertyId ?? null, ...(await previewMonthlyBilling(periodKey, propertyId, assigned)) });
 });
 
 router.post('/billing/generate', requirePermission('billing:write'), async (req, res) => {
   const { periodKey, propertyId } = z.object({ periodKey: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/), propertyId: id.optional(), confirmed: z.literal(true) }).parse(req.body);
+  if (propertyId && req.user?.role !== 'SUPER_ADMIN' && !(req.user?.propertyIds ?? []).includes(propertyId)) return res.status(403).json({ error: 'You do not have access to this property.' });
   if (propertyId && !await Property.exists({ _id: propertyId, active: true })) return res.status(404).json({ error: 'Active property not found.' });
-  return res.json(await generateMonthlyBilling(periodKey, req.user!.id, propertyId));
+  const assigned = req.user?.role === 'SUPER_ADMIN' ? undefined : req.user?.propertyIds ?? [];
+  return res.json(await generateMonthlyBilling(periodKey, req.user!.id, propertyId, assigned));
 });
 
 router.patch('/charges/:id/adjust', requirePermission('billing:write'), async (req, res) => {
@@ -115,6 +128,7 @@ router.patch('/charges/:id/adjust', requirePermission('billing:write'), async (r
   const after = paiseFromRupees(data.amount);
   const charge = await inTransaction(async (session) => {
     const doc = await Charge.findById(req.params.id).session(session); if (!doc) throw Object.assign(new Error('Charge not found.'), { status: 404 });
+    if (!await residentIsInScope(req, String(doc.residentId))) throw Object.assign(new Error('You do not have access to this resident’s property.'), { status: 403 });
     const before = doc.amountPaise;
     if (after < doc.paidPaise + (doc.externalPaidPaise ?? 0)) throw Object.assign(new Error('Adjusted charge cannot be lower than payments already recorded.'), { status: 409 });
     doc.amountPaise = after; doc.status = chargeStatus(after, doc.paidPaise + (doc.externalPaidPaise ?? 0), doc.dueAt); doc.audit.push({ at: new Date(), by: new Types.ObjectId(req.user!.id), action: 'ADJUSTED', reason: data.reason, beforePaise: before, afterPaise: after });
@@ -129,10 +143,10 @@ router.get('/payments', requirePermission('payments:read'), async (req, res) => 
   const page = Math.max(1, Number(req.query.page) || 1); const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25));
   const filter: Record<string, unknown> = {};
   if (req.query.residentId && id.safeParse(req.query.residentId).success) filter.residentId = req.query.residentId;
-  if (req.query.propertyId && id.safeParse(req.query.propertyId).success) {
-    const roomIds = await Room.distinct('_id', { propertyId: req.query.propertyId });
-    filter.residentId = { $in: await RoomAllocation.distinct('residentId', { active: true, roomId: { $in: roomIds } }) };
-  }
+  const requestedPropertyId = req.query.propertyId && id.safeParse(req.query.propertyId).success ? String(req.query.propertyId) : undefined;
+  const scope = await scopedResidentIds(req, requestedPropertyId);
+  if (scope.forbidden) return res.status(403).json({ error: 'You do not have access to this property.' });
+  if (scope.ids !== null) { const current = filter.residentId; filter.residentId = { $in: current ? scope.ids.filter((residentId) => String(residentId) === String(current)) : scope.ids }; }
   if (req.query.method && ['CASH', 'BANK_TRANSFER', 'UPI', 'OTHER'].includes(String(req.query.method))) filter.method = req.query.method;
   if (req.query.from || req.query.to) filter.paymentDate = { ...(req.query.from ? { $gte: rangeDate(req.query.from) } : {}), ...(req.query.to ? { $lte: rangeDate(req.query.to, true) } : {}) };
   const [payments, total] = await Promise.all([Payment.find(filter).populate('residentId', 'residentId fullName mobile').sort({ paymentDate: -1 }).skip((page - 1) * limit).limit(limit).lean(), Payment.countDocuments(filter)]);
@@ -141,6 +155,8 @@ router.get('/payments', requirePermission('payments:read'), async (req, res) => 
 
 router.post('/payments', requirePermission('payments:write'), async (req, res) => {
   const data = z.object({ residentId: id, propertyId: id.optional(), amount: z.number().positive().max(10000000), paymentDate: day, method: z.enum(['CASH', 'BANK_TRANSFER', 'UPI', 'OTHER']), reference: z.string().max(120).default(''), notes: z.string().max(1000).default(''), allocations: z.array(z.object({ chargeId: id, amount: z.number().positive() })).max(50).default([]).refine((values) => new Set(values.map((v) => v.chargeId)).size === values.length, 'A charge can only appear once per payment.'), idempotencyKey: z.string().uuid() }).parse(req.body);
+  if (!await residentIsInScope(req, data.residentId)) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
+  if (data.propertyId && req.user?.role !== 'SUPER_ADMIN' && !(req.user?.propertyIds ?? []).includes(data.propertyId)) return res.status(403).json({ error: 'You do not have access to this property.' });
   if (data.propertyId) { const property = await Property.findOne({ _id: data.propertyId, active: true }); const roomIds = await Room.distinct('_id', { propertyId: data.propertyId }); if (!property || !await RoomAllocation.exists({ residentId: data.residentId, roomId: { $in: roomIds }, active: true })) return res.status(422).json({ error: 'Choose a resident currently assigned to this property.' }); }
   const amountPaise = paiseFromRupees(data.amount); const allocations = data.allocations.map((a) => ({ chargeId: a.chargeId, amountPaise: paiseFromRupees(a.amount) }));
   if (allocations.reduce((sum, a) => sum + a.amountPaise, 0) > amountPaise) return res.status(422).json({ error: 'Payment allocations cannot exceed the payment amount.' });
@@ -172,6 +188,7 @@ router.post('/payments/:id/allocate', requirePermission('payments:write'), async
   const additions = data.allocations.map((entry) => ({ chargeId: new Types.ObjectId(entry.chargeId), amountPaise: paiseFromRupees(entry.amount) }));
   const payment = await inTransaction(async (session) => {
     const doc = await Payment.findById(req.params.id).session(session); if (!doc) throw Object.assign(new Error('Payment not found.'), { status: 404 });
+    if (!await residentIsInScope(req, String(doc.residentId))) throw Object.assign(new Error('You do not have access to this resident’s property.'), { status: 403 });
     if (doc.reversedAt) throw Object.assign(new Error('A reversed payment cannot receive allocations.'), { status: 409 });
     if (doc.allocations.some((existing) => additions.some((entry) => String(existing.chargeId) === String(entry.chargeId)))) throw Object.assign(new Error('This payment already has an allocation to the selected charge.'), { status: 409 });
     const alreadyAllocated = doc.allocations.reduce((sum, entry) => sum + entry.amountPaise, 0);
@@ -197,6 +214,7 @@ router.post('/payments/:id/allocate', requirePermission('payments:write'), async
 router.get('/payments/:id/receipt', requirePermission('payments:read'), async (req, res) => {
   const payment = await Payment.findById(req.params.id).populate('residentId', 'residentId fullName mobile securityDepositPaise rentSchedules').lean();
   if (!payment) return res.status(404).json({ error: 'Payment not found.' });
+  if (!await residentIsInScope(req, String((payment.residentId as unknown as { _id: Types.ObjectId })._id))) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
   const [allocation, charges] = await Promise.all([
     RoomAllocation.findOne({ residentId: (payment.residentId as unknown as { _id: Types.ObjectId })._id, startDate: { $lte: payment.paymentDate }, $or: [{ endDate: null }, { endDate: { $gte: payment.paymentDate } }] }).sort({ startDate: -1 }).populate({ path: 'roomId', select: 'roomNumber propertyId propertyName', populate: { path: 'propertyId', select: 'name address' } }).lean(),
     Charge.find({ _id: { $in: payment.allocations.map((item) => item.chargeId) } }).select('kind utilityType periodKey description amountPaise').lean(),
@@ -210,6 +228,7 @@ router.post('/payments/:id/reverse', requirePermission('payments:write'), async 
   const { reason } = z.object({ reason: z.string().trim().min(5).max(1000) }).parse(req.body);
   const payment = await inTransaction(async (session) => {
     const doc = await Payment.findById(req.params.id).session(session); if (!doc) throw Object.assign(new Error('Payment not found.'), { status: 404 });
+    if (!await residentIsInScope(req, String(doc.residentId))) throw Object.assign(new Error('You do not have access to this resident’s property.'), { status: 403 });
     if (doc.reversedAt) throw Object.assign(new Error('This payment has already been reversed.'), { status: 409 });
     for (const allocation of doc.allocations) {
       const charge = await Charge.findById(allocation.chargeId).session(session); if (!charge) throw Object.assign(new Error('Allocated charge is missing; reversal was not completed.'), { status: 409 });

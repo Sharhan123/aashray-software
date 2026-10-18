@@ -4,7 +4,7 @@ import { ResidentMigration } from '../models/ResidentMigration.js';
 import { Room } from '../models/Room.js';
 import { AuditEvent } from '../models/AuditEvent.js';
 import { inTransaction } from './transactions.js';
-import { dueDateForPeriod, periodEnd, periodStart } from './billingRules.js';
+import { billingDayForDate, dueDateForPeriod, periodEnd, periodStart } from './billingRules.js';
 
 export interface BillingCandidate {
   residentId: string; residentRecordId: string; fullName: string; roomNumber: string; bedId: string;
@@ -32,8 +32,8 @@ export function billingEligibility(resident: BillingEligibilityInput, periodKey:
   return { schedule, allocation, exclusionReason };
 }
 
-export async function previewMonthlyBilling(periodKey: string, propertyId?: string): Promise<{ candidates: BillingCandidate[]; summary: Record<string, number> }> {
-  const roomIds = propertyId ? await Room.distinct('_id', { propertyId }) : null;
+export async function previewMonthlyBilling(periodKey: string, propertyId?: string, propertyIds?: string[]): Promise<{ candidates: BillingCandidate[]; summary: Record<string, number> }> {
+  const roomIds = propertyId ? await Room.distinct('_id', { propertyId }) : propertyIds ? await Room.distinct('_id', { propertyId: { $in: propertyIds } }) : null;
   const residents = await Resident.find(roomIds ? { allocations: { $elemMatch: { roomId: { $in: roomIds }, endDate: null } } } : {}).lean();
   const candidates: BillingCandidate[] = [];
   for (const resident of residents) {
@@ -46,7 +46,7 @@ export async function previewMonthlyBilling(periodKey: string, propertyId?: stri
     if (!exclusionReason && paidOutside >= (schedule?.monthlyRentPaise ?? 0)) exclusionReason = 'Current period was settled outside the software during migration.';
     const eligible = !exclusionReason;
     const monthlyRentPaise = schedule?.monthlyRentPaise ?? 0;
-    const dueAt = dueDateForPeriod(periodKey, schedule?.dueDay ?? 1);
+    const dueAt = dueDateForPeriod(periodKey, billingDayForDate(resident.admissionDate));
     const prepaidApplied = migration ? Math.min(migration.creditRemainingPaise, Math.max(0, monthlyRentPaise - paidOutside)) : 0;
     candidates.push({ residentId: resident.residentId, residentRecordId: String(resident._id), fullName: resident.fullName, roomNumber: allocation?.roomNumber ?? '', bedId: allocation?.bedId ?? '', scheduleVersion: schedule?.version ?? null, monthlyRentPaise, periodKey, dueAt, existing: Boolean(existing), eligible, exclusionReason: existing ? 'A rent charge already exists for this resident and period.' : exclusionReason, proposedPaise: eligible && !existing ? Math.max(0, monthlyRentPaise - paidOutside - prepaidApplied) : 0 });
   }
@@ -56,8 +56,8 @@ export async function previewMonthlyBilling(periodKey: string, propertyId?: stri
   return { candidates, summary };
 }
 
-export async function generateMonthlyBilling(periodKey: string, actorId: string, propertyId?: string) {
-  const preview = await previewMonthlyBilling(periodKey, propertyId);
+export async function generateMonthlyBilling(periodKey: string, actorId: string, propertyId?: string, propertyIds?: string[]) {
+  const preview = await previewMonthlyBilling(periodKey, propertyId, propertyIds);
   let created = 0; let skipped = 0; let createdPaise = 0;
   for (const candidate of preview.candidates) {
     if (!candidate.eligible || candidate.existing || candidate.monthlyRentPaise <= 0) { skipped++; continue; }
@@ -74,8 +74,9 @@ export async function generateMonthlyBilling(periodKey: string, actorId: string,
         const creditApplied = migration ? Math.min(migration.creditRemainingPaise, schedule.monthlyRentPaise - outsideCurrent) : 0;
         const externalPaidPaise = outsideCurrent + creditApplied;
         if (migration && creditApplied > 0) { migration.creditRemainingPaise -= creditApplied; await migration.save({ session }); }
-        const [charge] = await Charge.create([{ residentId: resident._id, kind: 'RENT', periodKey, description: `Rent for ${periodKey}`, amountPaise: schedule.monthlyRentPaise, paidPaise: 0, externalPaidPaise, issuedAt: new Date(), dueAt: dueDateForPeriod(periodKey, schedule.dueDay), scheduleVersion: schedule.version, idempotencyKey: `rent:${resident._id}:${periodKey}`, createdBy: actorId }], { session });
-        await AuditEvent.create([{ actorId, action: 'MONTHLY_RENT_CHARGE_CREATED', entityType: 'Charge', entityId: String(charge!._id), details: { residentId: resident.residentId, periodKey, amountPaise: schedule.monthlyRentPaise, externalPaidPaise } }], { session });
+        const dueDay = billingDayForDate(resident.admissionDate);
+        const [charge] = await Charge.create([{ residentId: resident._id, kind: 'RENT', periodKey, description: `Rent for ${periodKey}`, amountPaise: schedule.monthlyRentPaise, paidPaise: 0, externalPaidPaise, issuedAt: new Date(), dueAt: dueDateForPeriod(periodKey, dueDay), scheduleVersion: schedule.version, idempotencyKey: `rent:${resident._id}:${periodKey}`, createdBy: actorId }], { session });
+        await AuditEvent.create([{ actorId, action: 'MONTHLY_RENT_CHARGE_CREATED', entityType: 'Charge', entityId: String(charge!._id), details: { residentId: resident.residentId, periodKey, amountPaise: schedule.monthlyRentPaise, externalPaidPaise, dueDay } }], { session });
         return charge!.amountPaise;
       });
       if (amount) { created++; createdPaise += amount; } else skipped++;

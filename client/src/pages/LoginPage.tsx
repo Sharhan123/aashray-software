@@ -16,7 +16,7 @@ export function LoginPage() {
   const { register, handleSubmit, formState: { errors, isSubmitting } } = useForm<FormValues>({ resolver: zodResolver(schema), mode: 'onBlur' });
   const onSubmit = handleSubmit(async (values) => {
     setServerError('');
-    try { await signIn(values.email, values.password); navigate((location.state as { from?: string } | null)?.from ?? '/', { replace: true }); }
+    try { await signIn(values.email, values.password); navigate((location.state as { from?: string } | null)?.from ?? '/dashboard', { replace: true }); }
     catch (error) { setServerError(error instanceof Error ? error.message : 'Unable to sign in. Please try again.'); }
   });
 

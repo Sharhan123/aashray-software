@@ -8,7 +8,28 @@ export function paiseFromRupees(value: number, allowZero = false): number {
 }
 
 export function periodKeyFor(date: Date): string {
-  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit' }).formatToParts(date);
+  const year = parts.find((part) => part.type === 'year')?.value ?? '2000';
+  const month = parts.find((part) => part.type === 'month')?.value ?? '01';
+  return `${year}-${month}`;
+}
+
+export function billingDayForDate(date: Date): number {
+  return Number(new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', day: '2-digit' }).format(date));
+}
+
+export function billingStartDateForPeriod(periodKey: string, billingDay: number): Date {
+  const [year = 2000, month = 1] = periodKey.split('-').map(Number);
+  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return new Date(Date.UTC(year, month - 1, Math.min(billingDay, lastDay), 12));
+}
+
+export function admissionBillingStartDate(now: Date, admissionDate: Date): Date {
+  return billingStartDateForPeriod(periodKeyFor(now), billingDayForDate(admissionDate));
+}
+
+export function dueDateForBillingStart(periodKey: string, billingStartDate: Date): Date {
+  return dueDateForPeriod(periodKey, billingDayForDate(billingStartDate));
 }
 
 export function dueDateForPeriod(periodKey: string, dueDay: number): Date {

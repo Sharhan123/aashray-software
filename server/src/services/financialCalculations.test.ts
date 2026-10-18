@@ -16,6 +16,6 @@ describe('shared charge ledger calculations', () => {
       { kind: 'OPENING_BALANCE', amountPaise: 500000, externalPaidPaise: 100000, dueAt: new Date('2026-09-01') },
       { kind: 'UTILITY', amountPaise: 100000, paidPaise: 25000, dueAt: new Date('2026-10-31') },
     ], new Date('2026-10-17'));
-    expect(summary).toEqual({ outstandingPaise: 1275000, overdueRentPaise: 400000, pendingUtilityPaise: 75000, rentBilledPaise: 1300000 });
+    expect(summary).toEqual({ outstandingPaise: 1275000, overdueRentPaise: 0, pendingUtilityPaise: 75000, rentBilledPaise: 1300000, rentOutstandingPaise: 800000, openingBalanceOutstandingPaise: 400000 });
   });
 });

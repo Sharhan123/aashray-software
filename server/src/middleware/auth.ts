@@ -7,7 +7,7 @@ declare global {
   // Express request augmentation uses this namespace as required by @types/express.
   // eslint-disable-next-line @typescript-eslint/no-namespace
   namespace Express {
-    interface Request { user?: { id: string; name: string; email: string; role: Role; permissions: Permission[] } }
+    interface Request { user?: { id: string; name: string; email: string; role: Role; permissions: Permission[]; propertyIds?: string[] } }
   }
 }
 
@@ -19,7 +19,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     if (!session) return res.status(401).json({ error: 'Authentication required.' });
     const user = await User.findOne({ _id: session.userId, active: true });
     if (!user) return res.status(401).json({ error: 'Authentication required.' });
-    req.user = { id: user.id, name: user.name, email: user.email, role: user.role, permissions: user.permissions as Permission[] };
+    req.user = { id: user.id, name: user.name, email: user.email, role: user.role, permissions: user.permissions as Permission[], propertyIds: (user.propertyIds ?? []).map(String) };
     return next();
   } catch (error) { return next(error); }
 }
