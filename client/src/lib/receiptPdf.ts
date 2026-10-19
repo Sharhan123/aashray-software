@@ -22,7 +22,28 @@ export type ReceiptPdfData = {
     roomId?: { roomNumber?: string; propertyName?: string; propertyId?: { name?: string } };
     bedId?: string;
   };
-  breakdown?: { amountPaise: number; charge?: { periodKey?: string; description?: string } }[];
+  breakdown?: { amountPaise: number; charge?: { periodKey?: string; servicePeriodStart?: string; servicePeriodEnd?: string; description?: string } }[];
+};
+
+export type CheckoutSummaryPdfData = {
+  checkoutNumber: string;
+  checkoutDate: string;
+  checkedOutAt: string;
+  reason: string;
+  propertyName?: string;
+  roomNumber?: string;
+  bedId?: string;
+  outstandingBeforePaise: number;
+  depositHeldPaise: number;
+  appliedToChargesPaise: number;
+  refundedToDatePaise: number;
+  depositRetainedPaise: number;
+  refundableRemainingPaise: number;
+  settlementDuePaise: number;
+  settlementStatus: string;
+  charges: { description: string; periodKey?: string; servicePeriodStart?: string; servicePeriodEnd?: string; amountPaise: number; appliedPaise: number; remainingPaise: number; currentBalancePaise?: number }[];
+  finalBills: { description: string; periodKey?: string; servicePeriodStart?: string; servicePeriodEnd?: string; amountPaise: number; appliedPaise: number; remainingPaise: number; currentBalancePaise?: number }[];
+  resident?: { fullName?: string; residentId?: string; mobile?: string };
 };
 
 const BLUE = '#1681b4';
@@ -34,6 +55,7 @@ const MUTED = '#71809a';
 const LINE = '#dce5f0';
 const formatMoney = (paise = 0) => `Rs. ${(paise / 100).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const formatDate = (value: string) => new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' }).format(new Date(value));
+const chargePeriod = (charge?: { periodKey?: string; servicePeriodStart?: string; servicePeriodEnd?: string }) => charge?.servicePeriodStart && charge.servicePeriodEnd ? `${formatDate(charge.servicePeriodStart)} to ${formatDate(charge.servicePeriodEnd)}` : charge?.periodKey ?? '';
 
 function makeReceiptCanvas(data: ReceiptPdfData, amountWords: string, brandLogo: HTMLImageElement) {
   const canvas = document.createElement('canvas');
@@ -47,7 +69,7 @@ function makeReceiptCanvas(data: ReceiptPdfData, amountWords: string, brandLogo:
   const property = data.allocation?.roomId?.propertyId?.name ?? data.allocation?.roomId?.propertyName ?? 'Not assigned';
   const room = data.allocation?.roomId?.roomNumber ?? 'Not assigned';
   const bed = data.allocation?.bedId ?? 'Not assigned';
-  const periods = [...new Set((data.breakdown ?? []).map((item) => item.charge?.periodKey).filter((period): period is string => Boolean(period)))].sort();
+  const periods = [...new Set((data.breakdown ?? []).map((item) => chargePeriod(item.charge)).filter(Boolean))].sort();
   const monthlyRent = resident?.rentSchedules?.at(-1)?.monthlyRentPaise ?? 0;
   const note = [data.notes, data.reference ? `Reference: ${data.reference}` : '', data.unallocatedPaise ? `${formatMoney(data.unallocatedPaise)} is currently unallocated.` : '', data.reversedAt ? `Reversed${data.reversalReason ? `: ${data.reversalReason}` : ''}` : ''].filter(Boolean).join(' | ') || 'No additional notes.';
   const displayDate = formatDate(data.paymentDate);
@@ -113,7 +135,7 @@ function makeReceiptCanvas(data: ReceiptPdfData, amountWords: string, brandLogo:
     drawAllocationRow(ctx, left, rowY, width, 'Payment recorded to resident account', 'Not linked to a charge'); rowY += 50;
   } else {
     for (const item of shown) {
-      const description = [item.charge?.description, item.charge?.periodKey].filter(Boolean).join(' | ') || 'Resident charge';
+      const description = [item.charge?.description, chargePeriod(item.charge)].filter(Boolean).join(' | ') || 'Resident charge';
       drawAllocationRow(ctx, left, rowY, width, description, formatMoney(item.amountPaise)); rowY += 50;
     }
     if (breakdown.length > shown.length) {
@@ -246,4 +268,62 @@ export async function shareReceiptPdf(data: ReceiptPdfData, amountWords: string)
   const file = new File([blob], `${data.receiptNumber.replace(/[^A-Za-z0-9_-]/g, '-')}.pdf`, { type: 'application/pdf' });
   if (navigator.share && navigator.canShare?.({ files: [file] })) await navigator.share({ title: 'Aashray payment receipt', files: [file] });
   else saveReceiptBlob(blob, data.receiptNumber);
+}
+
+function checkoutRefundDeadline(value: string) {
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date(value));
+  const year = Number(parts.find((part) => part.type === 'year')?.value);
+  const month = Number(parts.find((part) => part.type === 'month')?.value);
+  const day = Number(parts.find((part) => part.type === 'day')?.value);
+  return new Date(Date.UTC(year, month - 1, day + 21, 12));
+}
+
+function makeCheckoutCanvas(data: CheckoutSummaryPdfData, brandLogo: HTMLImageElement) {
+  const canvas = document.createElement('canvas'); canvas.width = 1240; canvas.height = 1754;
+  const ctx = canvas.getContext('2d'); if (!ctx) throw new Error('Could not prepare the checkout summary PDF.');
+  const left = 86; const right = canvas.width - 86; const width = right - left;
+  const deadline = formatDate(checkoutRefundDeadline(data.checkoutDate).toISOString());
+  const rows = [...data.charges, ...data.finalBills];
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.fillStyle = BLUE; ctx.fillRect(0, 0, canvas.width, 18);
+  ctx.drawImage(brandLogo, left, 48, 290, 97); ctx.textAlign = 'right'; ctx.fillStyle = DARK_BLUE; ctx.font = 'bold 18px Arial, sans-serif'; ctx.fillText('SURAT, GUJARAT', right, 91); ctx.fillStyle = MUTED; ctx.font = '18px Arial, sans-serif'; ctx.fillText('Resident checkout statement', right, 123); drawRule(ctx, left, 172, width);
+  ctx.textAlign = 'left'; ctx.fillStyle = NAVY; ctx.font = 'bold 37px Arial, sans-serif'; ctx.fillText('Checkout summary', left, 235);
+  drawField(ctx, left, 284, 'Resident', data.resident?.fullName || 'Resident', 500); drawField(ctx, left + 540, 284, 'Resident ID', data.resident?.residentId || 'Not available', 500);
+  drawField(ctx, left, 354, 'Mobile', data.resident?.mobile || 'Not available', 500); drawField(ctx, left + 540, 354, 'Checkout date', formatDate(data.checkoutDate), 500);
+  drawField(ctx, left, 424, 'Property / room / bed', `${data.propertyName || 'Not assigned'} / ${data.roomNumber || '—'} / ${data.bedId || '—'}`, width); drawField(ctx, left, 494, 'Checkout reason', data.reason || 'Not provided', width);
+  drawSectionTitle(ctx, left, 580, 'Settlement status');
+  ctx.fillStyle = PALE_BLUE; ctx.fillRect(left, 600, width, 220); ctx.fillStyle = BLUE; ctx.fillRect(left, 600, 8, 220);
+  drawField(ctx, left + 30, 646, 'Outstanding at checkout', formatMoney(data.outstandingBeforePaise), 320);
+  drawField(ctx, left + 390, 646, 'Payable to Aashray now', formatMoney(data.settlementDuePaise), 320);
+  drawField(ctx, left + 750, 646, 'Payment status', data.settlementStatus === 'PAID' ? 'PAID' : data.settlementStatus === 'DUE' ? 'DUE / UNPAID' : data.settlementStatus === 'NO_DUE' ? 'NO DUE' : 'HISTORICAL RECORD', 300);
+  drawField(ctx, left + 30, 728, 'Deposit held', formatMoney(data.depositHeldPaise), 320);
+  drawField(ctx, left + 390, 728, 'Applied to charges', formatMoney(data.appliedToChargesPaise), 320);
+  ctx.fillStyle = '#d9f3e7'; ctx.fillRect(left + 738, 704, 318, 78); ctx.strokeStyle = '#56a77d'; ctx.lineWidth = 2; ctx.strokeRect(left + 738, 704, 318, 78);
+  ctx.textAlign = 'left'; ctx.fillStyle = '#315f48'; ctx.font = 'bold 17px Arial, sans-serif'; ctx.fillText('REFUNDABLE DEPOSIT', left + 750, 730);
+  ctx.fillStyle = '#12683d'; ctx.font = 'bold 29px Arial, sans-serif'; ctx.fillText(fitText(ctx, formatMoney(data.refundableRemainingPaise), 290), left + 750, 766);
+  if (data.settlementDuePaise > 0) { ctx.textAlign = 'left'; ctx.fillStyle = DARK_BLUE; ctx.font = 'bold 15px Arial, sans-serif'; ctx.fillText('Remaining settlement amount is payable to Aashray Hospitality.', left + 30, 808); }
+  drawSectionTitle(ctx, left, 880, 'Outstanding charge details');
+  let y = 906; ctx.fillStyle = PALE_BLUE; ctx.fillRect(left, y, width, 44); ctx.fillStyle = DARK_BLUE; ctx.font = 'bold 15px Arial, sans-serif'; ctx.textAlign = 'left'; ctx.fillText('CHARGE', left + 12, y + 28); ctx.textAlign = 'right'; ctx.fillText('AT CHECKOUT', right - 260, y + 28); ctx.fillText('BALANCE NOW', right - 12, y + 28); y += 44;
+  const shown = rows.slice(0, 7);
+  if (!shown.length) { drawAllocationRow(ctx, left, y, width, 'No outstanding charge recorded at checkout', 'Rs. 0.00'); y += 50; }
+  else for (const row of shown) { const label = [row.description, chargePeriod(row)].filter(Boolean).join(' · '); const now = row.currentBalancePaise ?? row.remainingPaise; ctx.fillStyle = INK; ctx.font = '16px Arial, sans-serif'; ctx.textAlign = 'left'; ctx.fillText(fitText(ctx, label, width - 500), left + 12, y + 29); ctx.textAlign = 'right'; ctx.fillText(formatMoney(row.remainingPaise), right - 260, y + 29); ctx.fillText(formatMoney(now), right - 12, y + 29); drawRule(ctx, left, y + 48, width); y += 50; }
+  if (rows.length > shown.length) { ctx.textAlign = 'left'; ctx.fillStyle = MUTED; ctx.font = '15px Arial, sans-serif'; ctx.fillText(`${rows.length - shown.length} additional charges are listed in the resident ledger.`, left + 12, y + 26); y += 42; }
+  y = Math.max(y + 30, 1330); drawSectionTitle(ctx, left, y, 'Security deposit refund');
+  ctx.fillStyle = PALE_BLUE; ctx.fillRect(left, y + 20, width, 125); ctx.fillStyle = INK; ctx.textAlign = 'left'; ctx.font = '18px Arial, sans-serif';
+  wrapText(ctx, `Refundable deposit: ${formatMoney(data.refundableRemainingPaise)}. This amount will be refunded only after 21 days from checkout, on or after ${deadline}. Refunds recorded to date: ${formatMoney(data.refundedToDatePaise)}.`, left + 20, y + 58, width - 40, 28, 3);
+  drawRule(ctx, left, 1654, width); ctx.fillStyle = MUTED; ctx.font = '16px Arial, sans-serif'; ctx.textAlign = 'left'; ctx.fillText('Aashray Hospitality  |  Checkout settlement summary', left, 1690); ctx.textAlign = 'right'; ctx.fillText('Prepared from saved resident and financial ledgers', right, 1690);
+  return canvas;
+}
+
+async function checkoutSummaryBlob(data: CheckoutSummaryPdfData) { const logo = await loadBrandLogo(); return createPdf(makeCheckoutCanvas(data, logo)); }
+
+function saveCheckoutBlob(blob: Blob, checkoutNumber: string) {
+  const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `Aashray-checkout-${checkoutNumber.replace(/[^A-Za-z0-9_-]/g, '-')}.pdf`; document.body.appendChild(anchor); anchor.click(); anchor.remove(); window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+export async function downloadCheckoutSummaryPdf(data: CheckoutSummaryPdfData) { saveCheckoutBlob(await checkoutSummaryBlob(data), data.checkoutNumber); }
+
+export async function printCheckoutSummaryPdf(data: CheckoutSummaryPdfData) {
+  const printWindow = window.open('', '_blank'); if (!printWindow) throw new Error('Allow pop-ups to open the checkout summary for printing.');
+  try { const url = URL.createObjectURL(await checkoutSummaryBlob(data)); printWindow.location.href = url; window.setTimeout(() => { try { printWindow.print(); } catch { /* The PDF viewer can still print from its toolbar. */ } }, 900); window.setTimeout(() => URL.revokeObjectURL(url), 60_000); }
+  catch (error) { printWindow.close(); throw error; }
 }

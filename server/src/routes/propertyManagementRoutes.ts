@@ -7,6 +7,7 @@ import { RoomAllocation } from '../models/RoomAllocation.js';
 import { Resident } from '../models/Resident.js';
 import { Charge } from '../models/Charge.js';
 import { AuditEvent } from '../models/AuditEvent.js';
+import { inTransaction } from '../services/transactions.js';
 import { requireAuth, requirePermission, requireRole } from '../middleware/auth.js';
 import { chargeBalance } from '../services/financialCalculations.js';
 import { businessMonthRange, rentChargeMongoFilter } from '../services/rentStatus.js';
@@ -14,7 +15,7 @@ import { businessMonthRange, rentChargeMongoFilter } from '../services/rentStatu
 const router = Router();
 router.use(requireAuth);
 const objectId = z.string().regex(/^[a-f\d]{24}$/i);
-const propertyInput = z.object({ name: z.string().trim().min(2).max(160), address: z.string().max(500).default(''), contactPhone: z.string().max(30).default(''), contactEmail: z.string().email().max(254).or(z.literal('')).default(''), notes: z.string().max(2000).default('') });
+const propertyInput = z.object({ name: z.string().trim().min(2).max(160), gender: z.enum(['MALE', 'FEMALE']).optional(), address: z.string().max(500).default(''), contactPhone: z.string().max(30).default(''), contactEmail: z.string().email().max(254).or(z.literal('')).default(''), notes: z.string().max(2000).default('') });
 
 router.get('/properties', requirePermission('rooms:read'), async (req, res) => {
   const properties = await Property.find(req.user!.role === 'SUPER_ADMIN' ? {} : { _id: { $in: req.user!.propertyIds ?? [] } }).sort({ active: -1, name: 1 }).lean();
@@ -60,16 +61,33 @@ router.get('/properties', requirePermission('rooms:read'), async (req, res) => {
 
 router.post('/properties', requirePermission('rooms:write'), requireRole('SUPER_ADMIN'), async (req, res) => {
   const data = propertyInput.parse(req.body);
+  if (!data.gender) return res.status(422).json({ error: 'Choose whether this property is for male or female residents.' });
   const property = await Property.create({ ...data, contactEmail: data.contactEmail.toLowerCase(), createdBy: req.user!.id });
   await AuditEvent.create({ actorId: req.user!.id, action: 'PROPERTY_CREATED', entityType: 'Property', entityId: String(property._id) });
   return res.status(201).json({ property });
 });
 
 router.put('/properties/:id', requirePermission('rooms:write'), requireRole('SUPER_ADMIN'), async (req, res) => {
-  const data = propertyInput.parse(req.body); const property = await Property.findByIdAndUpdate(req.params.id, { $set: { ...data, contactEmail: data.contactEmail.toLowerCase() } }, { new: true, runValidators: true });
+  const data = propertyInput.parse(req.body);
+  const { gender, ...propertyFields } = data;
+  const result = await inTransaction(async (session) => {
+    const property = await Property.findById(req.params.id).session(session);
+    if (!property) return null;
+    property.set({ ...propertyFields, ...(gender ? { gender } : {}), contactEmail: data.contactEmail.toLowerCase() });
+    await property.save({ session });
+    await Room.updateMany({ propertyId: property._id }, { $set: { propertyName: property.name } }, { session });
+    let updatedResidentCount = 0;
+    if (gender) {
+      const roomIds = await Room.distinct('_id', { propertyId: property._id }).session(session);
+      const residentIds = await RoomAllocation.distinct('residentId', { roomId: { $in: roomIds } }).session(session);
+      const update = await Resident.updateMany({ _id: { $in: residentIds }, gender: { $ne: gender } }, { $set: { gender } }, { session });
+      updatedResidentCount = update.modifiedCount;
+    }
+    await AuditEvent.create([{ actorId: req.user!.id, action: 'PROPERTY_UPDATED', entityType: 'Property', entityId: String(property._id), details: { gender: property.gender ?? null, updatedResidentCount } }], { session });
+    return { property, updatedResidentCount };
+  });
+  const property = result?.property;
   if (!property) return res.status(404).json({ error: 'Property not found.' });
-  await Room.updateMany({ propertyId: property._id }, { $set: { propertyName: property.name } });
-  await AuditEvent.create({ actorId: req.user!.id, action: 'PROPERTY_UPDATED', entityType: 'Property', entityId: String(property._id) });
   return res.json({ property });
 });
 

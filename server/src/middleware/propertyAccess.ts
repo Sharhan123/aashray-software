@@ -20,7 +20,8 @@ export async function scopedResidentIds(req: Request, requestedPropertyId?: stri
   if (rooms.forbidden) return rooms;
   if (rooms.ids === null) return { forbidden: false, ids: null };
   if (!rooms.ids.length) return { forbidden: false, ids: [] };
-  return { forbidden: false, ids: await RoomAllocation.distinct('residentId', { active: true, roomId: { $in: rooms.ids } }) };
+  // Preserve read access to historical residents who checked out of an assigned property.
+  return { forbidden: false, ids: await RoomAllocation.distinct('residentId', { roomId: { $in: rooms.ids } }) };
 }
 
 export async function residentIsInScope(req: Request, residentId: string): Promise<boolean> {

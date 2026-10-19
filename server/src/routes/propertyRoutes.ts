@@ -10,11 +10,13 @@ import { Charge } from '../models/Charge.js';
 import { Payment } from '../models/Payment.js';
 import { DepositTransaction } from '../models/DepositTransaction.js';
 import { ResidentMigration } from '../models/ResidentMigration.js';
+import { ResidentCheckout } from '../models/ResidentCheckout.js';
 import { AuditEvent } from '../models/AuditEvent.js';
 import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { residentIsInScope, scopedResidentIds, scopedRoomIds } from '../middleware/propertyAccess.js';
 import { inTransaction } from '../services/transactions.js';
-import { billingDayForDate, billingStartDateForPeriod, chargeStatus, dueDateForPeriod, paiseFromRupees, periodKeyFor } from '../services/billingRules.js';
+import { admissionBillingStartDate, billingDayForDate, billingStartDateForPeriod, chargeStatus, dueDateForPeriod, paiseFromRupees, periodKeyFor } from '../services/billingRules.js';
+import { resolveUtilityPeriod, utilityPeriodDescription, utilityPeriodMonthKeys, utilityPeriodSchema } from '../services/utilityPeriod.js';
 import { admitResident } from '../services/admissionService.js';
 import { chargeLedger, residentFinancialSummary, rentChargeLedger } from '../services/financialCalculations.js';
 import { migrationOpeningPosition } from '../services/migrationAccounting.js';
@@ -25,7 +27,7 @@ router.use(requireAuth);
 const date = z.coerce.date();
 const objectId = z.string().regex(/^[a-f\d]{24}$/i);
 const roomInput = z.object({ propertyId: objectId.optional(), roomNumber: z.string().trim().min(1).max(40), roomType: z.enum(['AC', 'NON_AC']), capacity: z.number().int().min(1).max(30), bedIds: z.array(z.string().trim().min(1).max(20)).optional(), notes: z.string().max(1000).default('') });
-const residentInput = z.object({ fullName: z.string().trim().min(2).max(140), mobile: z.string().trim().min(8).max(24), email: z.string().trim().email().max(254).or(z.literal('')).default(''), governmentId: z.string().max(80).default(''), emergencyContact: z.string().max(120).default(''), admissionDate: date, billingStartDate: date, roomId: objectId, bedId: z.string().trim().min(1).max(20), monthlyRent: z.number().positive().max(10000000), dueDay: z.number().int().min(1).max(31), securityDeposit: z.number().min(0).max(10000000).default(0), depositPaid: z.number().min(0).max(10000000).default(0), depositMethod: z.enum(['CASH', 'BANK_TRANSFER', 'UPI', 'OTHER']).default('CASH'), notes: z.string().max(3000).default(''), idempotencyKey: z.string().uuid() }).superRefine((value, ctx) => { if (value.depositPaid > value.securityDeposit) ctx.addIssue({ code: 'custom', path: ['depositPaid'], message: 'Deposit received cannot exceed the agreed security deposit.' }); });
+const residentInput = z.object({ fullName: z.string().trim().min(2).max(140), gender: z.enum(['MALE', 'FEMALE']).optional(), mobile: z.string().trim().min(8).max(24), email: z.string().trim().email().max(254).or(z.literal('')).default(''), governmentId: z.string().max(80).default(''), emergencyContact: z.string().max(120).default(''), admissionDate: date, billingStartDate: date, roomId: objectId, bedId: z.string().trim().min(1).max(20), monthlyRent: z.number().positive().max(10000000), dueDay: z.number().int().min(1).max(31), securityDeposit: z.number().min(0).max(10000000).default(0), depositPaid: z.number().min(0).max(10000000).default(0), depositMethod: z.enum(['CASH', 'BANK_TRANSFER', 'UPI', 'OTHER']).default('CASH'), notes: z.string().max(3000).default(''), idempotencyKey: z.string().uuid() }).superRefine((value, ctx) => { if (value.depositPaid > value.securityDeposit) ctx.addIssue({ code: 'custom', path: ['depositPaid'], message: 'Deposit received cannot exceed the agreed security deposit.' }); });
 
 function parseCsv(text: string): string[][] {
   const rows: string[][] = []; let row: string[] = []; let cell = ''; let quoted = false;
@@ -40,7 +42,7 @@ async function validateResidentCsv(csv: string, allowedPropertyIds: string[] | n
   for (const [index, cells] of matrix.entries()) {
     const record = Object.fromEntries(headers.map((header, position) => [header, cells[position]?.trim() ?? '']));
     const room = await Room.findOne({ roomNumber: record.roomNumber, active: true, ...(allowedPropertyIds === null ? {} : { propertyId: { $in: allowedPropertyIds } }) }).select('_id');
-    const candidate = { ...record, roomId: room ? String(room._id) : '', monthlyRent: Number(record.monthlyRent), dueDay: Number(record.dueDay), securityDeposit: Number(record.securityDeposit || 0), depositPaid: Number(record.depositPaid || 0), depositMethod: record.depositMethod || 'CASH', idempotencyKey: `${hash.slice(0, 8)}-${String(index + 1).padStart(4, '0')}-4000-8000-${hash.slice(8, 20)}` };
+    const candidate = { ...record, gender: record.gender ? record.gender.trim().toUpperCase() : undefined, roomId: room ? String(room._id) : '', monthlyRent: Number(record.monthlyRent), dueDay: Number(record.dueDay), securityDeposit: Number(record.securityDeposit || 0), depositPaid: Number(record.depositPaid || 0), depositMethod: record.depositMethod || 'CASH', idempotencyKey: `${hash.slice(0, 8)}-${String(index + 1).padStart(4, '0')}-4000-8000-${hash.slice(8, 20)}` };
     const parsed = residentInput.safeParse(candidate);
     if (!room) errors.push({ row: index + 2, message: `Room ${record.roomNumber || '(empty)'} was not found or is inactive.` });
     else if (!parsed.success) errors.push({ row: index + 2, message: parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ') });
@@ -114,7 +116,7 @@ router.get('/residents', requirePermission('residents:read'), async (req, res) =
   if (req.query.search) { const term = String(req.query.search).slice(0, 60).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); filter.$or = [{ fullName: { $regex: term, $options: 'i' } }, { mobile: { $regex: term, $options: 'i' } }, { residentId: { $regex: term, $options: 'i' } }]; }
   if (req.query.propertyId && objectId.safeParse(req.query.propertyId).success) {
     const propertyRooms = await Room.distinct('_id', { propertyId: req.query.propertyId });
-    const matching = await RoomAllocation.distinct('residentId', { active: true, roomId: { $in: propertyRooms } });
+    const matching = await RoomAllocation.distinct('residentId', { roomId: { $in: propertyRooms } });
     filter._id = { $in: matching };
   }
   if (req.query.roomId && objectId.safeParse(req.query.roomId).success) {
@@ -152,20 +154,23 @@ router.get('/residents', requirePermission('residents:read'), async (req, res) =
   const sortKey = String(req.query.sort ?? 'createdAt'); const sortField = ({ name: 'fullName', admissionDate: 'admissionDate', residentId: 'residentId', createdAt: 'createdAt' } as Record<string, string>)[sortKey] ?? 'createdAt'; const direction = req.query.direction === 'asc' ? 1 : -1;
   const [residents, total] = await Promise.all([Resident.find(filter).sort({ [sortField]: direction }).skip((page - 1) * limit).limit(limit).lean(), Resident.countDocuments(filter)]);
   const ids = residents.map((r) => r._id);
-  const [allocations, charges, periodCharges] = await Promise.all([RoomAllocation.find({ residentId: { $in: ids }, active: true }).populate({ path: 'roomId', select: 'roomNumber roomType propertyId propertyName' }).lean(), Charge.aggregate([{ $match: { residentId: { $in: ids } } }, { $group: { _id: '$residentId', outstandingPaise: { $sum: { $max: [0, { $subtract: ['$amountPaise', { $add: ['$paidPaise', { $ifNull: ['$externalPaidPaise', 0] }] }] }] } } } }]), Charge.find({ residentId: { $in: ids }, kind: 'RENT', ...(rentPeriod === 'all' ? {} : { periodKey: rentPeriod }) }).sort({ dueAt: 1 }).lean()]);
+  const [allocations, historicalAllocations, charges, periodCharges] = await Promise.all([RoomAllocation.find({ residentId: { $in: ids }, active: true }).populate({ path: 'roomId', select: 'roomNumber roomType propertyId propertyName' }).lean(), RoomAllocation.find({ residentId: { $in: ids } }).populate({ path: 'roomId', select: 'roomNumber roomType propertyId propertyName' }).sort({ startDate: -1 }).lean(), Charge.aggregate([{ $match: { residentId: { $in: ids } } }, { $group: { _id: '$residentId', outstandingPaise: { $sum: { $max: [0, { $subtract: ['$amountPaise', { $add: ['$paidPaise', { $ifNull: ['$externalPaidPaise', 0] }] }] }] } } } }]), Charge.find({ residentId: { $in: ids }, kind: 'RENT', ...(rentPeriod === 'all' ? {} : { periodKey: rentPeriod }) }).sort({ dueAt: 1 }).lean()]);
   const allocMap = new Map(allocations.map((a) => [String(a.residentId), a])); const balanceMap = new Map(charges.map((c) => [String(c._id), c.outstandingPaise]));
+  const lastAllocMap = new Map<string, (typeof historicalAllocations)[number]>();
+  for (const allocation of historicalAllocations) if (!lastAllocMap.has(String(allocation.residentId))) lastAllocMap.set(String(allocation.residentId), allocation);
   const periodChargeMap = new Map<string, typeof periodCharges>();
   for (const charge of periodCharges) { const key = String(charge.residentId); periodChargeMap.set(key, [...(periodChargeMap.get(key) ?? []), charge]); }
   const now = new Date();
   return res.json({ residents: residents.map((r) => {
     const residentCharges = periodChargeMap.get(String(r._id)) ?? [];
-    return { ...r, currentAllocation: allocMap.get(String(r._id)) ?? null, outstandingPaise: balanceMap.get(String(r._id)) ?? 0, currentRentPaise: [...r.rentSchedules].sort((a, b) => b.effectiveFrom.getTime() - a.effectiveFrom.getTime())[0]?.monthlyRentPaise ?? 0, rentSummary: summarizeRentCharges(residentCharges, now), rentPeriod };
+    return { ...r, currentAllocation: allocMap.get(String(r._id)) ?? lastAllocMap.get(String(r._id)) ?? null, outstandingPaise: balanceMap.get(String(r._id)) ?? 0, currentRentPaise: [...r.rentSchedules].sort((a, b) => b.effectiveFrom.getTime() - a.effectiveFrom.getTime())[0]?.monthlyRentPaise ?? 0, rentSummary: summarizeRentCharges(residentCharges, now), rentPeriod };
   }), page, limit, total, pages: Math.ceil(total / limit) });
 });
 
 router.get('/imports/residents/template', requirePermission('residents:read'), (_req, res) => {
   res.type('text/csv'); res.setHeader('Content-Disposition', 'attachment; filename="aashray-resident-import-template.csv"');
-  return res.send(`${importHeaders.join(',')}\r\nExample Resident,+919876543210,,,,2026-10-01,2026-10-01,101,1,8500,5,10000,0,CASH,`);
+  const templateHeaders = [...importHeaders.slice(0, 1), 'gender', ...importHeaders.slice(1)];
+  return res.send(`${templateHeaders.join(',')}\r\nExample Resident,MALE,+919876543210,,,,2026-10-01,2026-10-01,101,1,8500,5,10000,0,CASH,`);
 });
 router.post('/imports/residents/preview', requirePermission('residents:write'), async (req, res) => {
   const { csv } = z.object({ csv: z.string().min(1).max(1_500_000) }).parse(req.body); const result = await validateResidentCsv(csv, req.user?.role === 'SUPER_ADMIN' ? null : req.user?.propertyIds ?? []);
@@ -202,7 +207,7 @@ router.get('/residents/:id', requirePermission('residents:read'), async (req, re
   const resident = await Resident.findById(req.params.id).lean();
   if (!resident) return res.status(404).json({ error: 'Resident not found.' });
   if (!await residentIsInScope(req, String(resident._id))) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
-  const [allocations, charges, payments, deposits, messages, audit, migration] = await Promise.all([
+  const [allocations, charges, payments, deposits, messages, audit, migration, checkouts] = await Promise.all([
     RoomAllocation.find({ residentId: resident._id }).populate('roomId', 'roomNumber roomType').sort({ startDate: -1 }).lean(),
     Charge.find({ residentId: resident._id }).sort({ dueAt: -1 }).lean(),
     Payment.find({ residentId: resident._id }).sort({ paymentDate: -1 }).lean(),
@@ -210,11 +215,53 @@ router.get('/residents/:id', requirePermission('residents:read'), async (req, re
     (await import('../models/MessageLog.js')).MessageLog.find({ residentId: resident._id }).sort({ createdAt: -1 }).limit(50).lean(),
     AuditEvent.find({ entityType: 'Resident', entityId: String(resident._id) }).sort({ createdAt: -1 }).limit(100).lean(),
     ResidentMigration.findOne({ residentId: resident._id }).lean(),
+    ResidentCheckout.find({ residentId: resident._id }).sort({ checkoutDate: -1 }).lean(),
   ]);
   const ledger = charges.map((c) => ({ ...c, ...(c.kind === 'RENT' ? rentChargeLedger(c) : chargeLedger(c)) }));
+  const liveCharges = new Map(ledger.map((charge) => [String(charge._id), charge]));
+  // Legacy refunds entered from the resident deposit ledger have no checkoutId.
+  // Attribute those post-checkout transactions to the oldest checkout with a
+  // remaining refundable balance so saved summaries reflect the deposit ledger.
+  const checkoutRefunds = new Map<string, typeof deposits>();
+  const refundableByCheckout = new Map(checkouts.map((checkout) => {
+    const linkedPostRefundPaise = deposits
+      .filter((entry) => entry.kind === 'REFUNDED' && String(entry.checkoutId ?? '') === String(checkout._id) && entry.reason.startsWith('Post-checkout refund:'))
+      .reduce((sum, entry) => sum + entry.amountPaise, 0);
+    return [String(checkout._id), Math.max(0, checkout.depositRetainedPaise - linkedPostRefundPaise)] as const;
+  }));
+  const oldestCheckouts = [...checkouts].sort((a, b) => new Date(a.checkedOutAt).getTime() - new Date(b.checkedOutAt).getTime());
+  const unlinkedRefunds = deposits
+    .filter((entry) => entry.kind === 'REFUNDED' && !entry.checkoutId)
+    .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+  for (const refund of unlinkedRefunds) {
+    let unallocatedPaise = refund.amountPaise;
+    for (const checkout of oldestCheckouts) {
+      if (new Date(refund.createdAt).getTime() < new Date(checkout.checkedOutAt).getTime()) continue;
+      const checkoutId = String(checkout._id);
+      const refundablePaise = refundableByCheckout.get(checkoutId) ?? 0;
+      if (!refundablePaise) continue;
+      const attributedPaise = Math.min(refundablePaise, unallocatedPaise);
+      const attributed = { ...refund, amountPaise: attributedPaise, checkoutId: checkout._id, reason: `Post-checkout refund: ${refund.reason}` };
+      checkoutRefunds.set(checkoutId, [...(checkoutRefunds.get(checkoutId) ?? []), attributed]);
+      refundableByCheckout.set(checkoutId, refundablePaise - attributedPaise);
+      unallocatedPaise -= attributedPaise;
+      if (!unallocatedPaise) break;
+    }
+  }
+  const checkoutSummaries = checkouts.map((checkout) => {
+    const checkoutChargeIds = [...checkout.charges, ...checkout.finalBills].map((charge) => charge.chargeId ? String(charge.chargeId) : null);
+    const matchedCharges = checkoutChargeIds.map((chargeId) => chargeId ? liveCharges.get(chargeId) : undefined);
+    const hasCompleteChargeHistory = checkoutChargeIds.length ? matchedCharges.every(Boolean) : checkout.outstandingBeforePaise === 0 && checkout.outstandingAfterPaise === 0;
+    const settlementDuePaise = hasCompleteChargeHistory ? matchedCharges.reduce((sum, charge) => sum + (charge?.balancePaise ?? 0), 0) : checkout.outstandingAfterPaise;
+    const linkedRefunds = [...deposits.filter((entry) => entry.kind === 'REFUNDED' && String(entry.checkoutId ?? '') === String(checkout._id)), ...(checkoutRefunds.get(String(checkout._id)) ?? [])];
+    const postCheckoutRefunds = linkedRefunds.filter((entry) => entry.reason.startsWith('Post-checkout refund:'));
+    const postCheckoutRefundedPaise = postCheckoutRefunds.reduce((sum, entry) => sum + entry.amountPaise, 0);
+    const settlementStatus = !checkoutChargeIds.length && checkout.outstandingBeforePaise === 0 ? 'NO_DUE' : hasCompleteChargeHistory ? settlementDuePaise === 0 ? 'PAID' : 'DUE' : 'HISTORICAL';
+    return { ...checkout, settlementDuePaise, settlementStatus, linkedRefunds, refundedToDatePaise: checkout.refundedPaise + postCheckoutRefundedPaise, refundableRemainingPaise: Math.max(0, checkout.depositRetainedPaise - postCheckoutRefundedPaise) };
+  });
   const summary = residentFinancialSummary(charges);
   const currentRentSummary = summarizeRentCharges(charges.filter((charge) => charge.kind === 'RENT' && charge.periodKey === periodKeyFor(new Date())));
-  return res.json({ resident, migration, allocations, charges: ledger, payments: payments.map((payment) => ({ ...payment, allocatedPaise: payment.reversedAt ? 0 : payment.allocations.reduce((sum, allocation) => sum + allocation.amountPaise, 0), unallocatedPaise: payment.reversedAt ? 0 : payment.amountPaise - payment.allocations.reduce((sum, allocation) => sum + allocation.amountPaise, 0) })), deposits, messages, audit, outstandingPaise: summary.outstandingPaise, overduePaise: summary.overdueRentPaise, rentOutstandingPaise: summary.rentOutstandingPaise, openingBalanceOutstandingPaise: summary.openingBalanceOutstandingPaise, rentSummary: currentRentSummary, pendingUtilityPaise: summary.pendingUtilityPaise, depositBalancePaise: deposits.reduce((sum, deposit) => sum + (deposit.kind === 'RECEIVED' ? deposit.amountPaise : deposit.kind === 'REFUNDED' ? -deposit.amountPaise : 0), 0) });
+  return res.json({ resident, migration, allocations, charges: ledger, payments: payments.map((payment) => ({ ...payment, allocatedPaise: payment.reversedAt ? 0 : payment.allocations.reduce((sum, allocation) => sum + allocation.amountPaise, 0), unallocatedPaise: payment.reversedAt ? 0 : payment.amountPaise - payment.allocations.reduce((sum, allocation) => sum + allocation.amountPaise, 0) })), deposits, messages, audit, checkouts: checkoutSummaries, outstandingPaise: summary.outstandingPaise, overduePaise: summary.overdueRentPaise, rentOutstandingPaise: summary.rentOutstandingPaise, openingBalanceOutstandingPaise: summary.openingBalanceOutstandingPaise, rentSummary: currentRentSummary, pendingUtilityPaise: summary.pendingUtilityPaise, depositBalancePaise: deposits.reduce((sum, deposit) => sum + (deposit.kind === 'RECEIVED' ? deposit.amountPaise : ['REFUNDED', 'APPLIED'].includes(deposit.kind) ? -deposit.amountPaise : 0), 0) });
 });
 
 const migrationFields = z.object({ goLiveDate: date, monthlyRent: z.number().positive().max(10000000), dueDay: z.number().int().min(1).max(31), openingArrears: z.number().min(0).max(10000000).default(0), prepaidRent: z.number().min(0).max(10000000).default(0), currentPeriodSettled: z.number().min(0).max(10000000).default(0), securityDepositHeld: z.number().min(0).max(10000000).default(0), source: z.string().trim().min(2).max(160), description: z.string().trim().min(5).max(500), depositMethod: z.enum(['CASH', 'BANK_TRANSFER', 'UPI', 'OTHER']).default('CASH') });
@@ -232,7 +279,7 @@ router.post('/residents/:id/migration-preview', requirePermission('billing:write
     DepositTransaction.find({ residentId: resident._id }).lean(),
     Charge.find({ residentId: resident._id }).sort({ dueAt: -1 }).limit(20).lean(),
   ]);
-  const depositLedgerPaise = existingDepositTransactions.reduce((sum, item) => sum + (item.kind === 'RECEIVED' ? item.amountPaise : item.kind === 'REFUNDED' ? -item.amountPaise : 0), 0);
+  const depositLedgerPaise = existingDepositTransactions.reduce((sum, item) => sum + (item.kind === 'RECEIVED' ? item.amountPaise : ['REFUNDED', 'APPLIED'].includes(item.kind) ? -item.amountPaise : 0), 0);
   const openingPosition = migrationOpeningPosition(paiseFromRupees(data.openingArrears, true), paiseFromRupees(data.prepaidRent, true));
   return res.json({ preview: { resident: { id: String(resident._id), residentId: resident.residentId, fullName: resident.fullName, admissionDate: resident.admissionDate, billingStartDate: resident.billingStartDate }, goLiveDate, periodKey, monthlyRentPaise: rentPaise, dueDay: billingDayForDate(resident.admissionDate), ...openingPosition, currentPeriodSettledPaise: paiseFromRupees(data.currentPeriodSettled, true), securityDepositHeldPaise: paiseFromRupees(data.securityDepositHeld, true), projectedOpeningNetPaise: openingPosition.openingBalancePaise, existingMigration: Boolean(existingMigration), existingPeriodCharge: existingCharge ? { id: String(existingCharge._id), amountPaise: existingCharge.amountPaise, paidPaise: existingCharge.paidPaise, kind: existingCharge.kind } : null, depositLedgerPaise, depositMatches: !existingDepositTransactions.length || depositLedgerPaise === paiseFromRupees(data.securityDepositHeld, true), depositWillBeRecorded: !existingDepositTransactions.length && paiseFromRupees(data.securityDepositHeld, true) > 0, recentCharges: currentCharges.map((charge) => ({ id: String(charge._id), kind: charge.kind, periodKey: charge.periodKey, amountPaise: charge.amountPaise, paidPaise: charge.paidPaise, description: charge.description })) } });
 });
@@ -245,7 +292,7 @@ router.post('/residents/:id/migration', requirePermission('billing:write'), asyn
   const arrearsPaise = paiseFromRupees(data.openingArrears, true); const prepaidPaise = paiseFromRupees(data.prepaidRent, true); const currentSettledPaise = paiseFromRupees(data.currentPeriodSettled, true); const depositHeldPaise = paiseFromRupees(data.securityDepositHeld, true);
   const openingPosition = migrationOpeningPosition(arrearsPaise, prepaidPaise);
   const depositEntries = await DepositTransaction.find({ residentId: resident._id }).lean();
-  const depositBalance = depositEntries.reduce((sum, item) => sum + (item.kind === 'RECEIVED' ? item.amountPaise : item.kind === 'REFUNDED' ? -item.amountPaise : 0), 0);
+  const depositBalance = depositEntries.reduce((sum, item) => sum + (item.kind === 'RECEIVED' ? item.amountPaise : ['REFUNDED', 'APPLIED'].includes(item.kind) ? -item.amountPaise : 0), 0);
   if (depositBalance !== depositHeldPaise && depositEntries.length) return res.status(409).json({ error: 'The verified held deposit differs from the existing deposit ledger. Reconcile the deposit ledger before migration.' });
   try {
     await inTransaction(async (session) => {
@@ -280,7 +327,7 @@ router.post('/residents/:id/migration', requirePermission('billing:write'), asyn
 });
 
 router.put('/residents/:id', requirePermission('residents:write'), async (req, res) => {
-  const data = z.object({ fullName: z.string().trim().min(2).max(140), mobile: z.string().trim().min(8).max(24), email: z.string().email().or(z.literal('')).default(''), emergencyContact: z.string().max(120).default(''), governmentId: z.string().max(80).default(''), notes: z.string().max(3000).default(''), monthlyRent: z.number().positive().max(10000000), dueDay: z.number().int().min(1).max(31), effectiveFrom: date, roomId: objectId, bedId: z.string().min(1).max(20) }).parse(req.body);
+  const data = z.object({ fullName: z.string().trim().min(2).max(140), gender: z.enum(['MALE', 'FEMALE']).optional(), mobile: z.string().trim().min(8).max(24), email: z.string().email().or(z.literal('')).default(''), emergencyContact: z.string().max(120).default(''), governmentId: z.string().max(80).default(''), notes: z.string().max(3000).default(''), monthlyRent: z.number().positive().max(10000000), dueDay: z.number().int().min(1).max(31), effectiveFrom: date, roomId: objectId, bedId: z.string().min(1).max(20) }).parse(req.body);
   const now = new Date(); const nextPeriodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
   if (data.effectiveFrom < nextPeriodStart || data.effectiveFrom.getUTCDate() !== 1) return res.status(422).json({ error: 'Rent schedule changes must start on the first day of a future billing period. Previously issued charges are never rewritten.' });
   const [resident, targetRoom] = await Promise.all([Resident.findById(req.params.id), Room.findOne({ _id: req.body.roomId, active: true })]);
@@ -288,6 +335,9 @@ router.put('/residents/:id', requirePermission('residents:write'), async (req, r
   if (!await residentIsInScope(req, String(resident._id))) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
   if (!targetRoom || !targetRoom.beds.some((b) => b.bedId === data.bedId && b.active)) return res.status(422).json({ error: 'Select an active room and bed.' });
   if (req.user?.role !== 'SUPER_ADMIN' && !(req.user?.propertyIds ?? []).includes(String(targetRoom.propertyId ?? ''))) return res.status(403).json({ error: 'You do not have access to the destination property.' });
+  const targetProperty = targetRoom.propertyId ? await Property.findById(targetRoom.propertyId).select('gender').lean() : null;
+  const residentGender = data.gender ?? resident.gender ?? targetProperty?.gender ?? undefined;
+  if (residentGender && targetProperty?.gender && residentGender !== targetProperty.gender) return res.status(422).json({ error: `This property is for ${targetProperty.gender.toLowerCase()} residents.` });
   const rentPaise = paiseFromRupees(data.monthlyRent); const dueDay = billingDayForDate(resident.admissionDate); const changedRent = resident.rentSchedules.at(-1)?.monthlyRentPaise !== rentPaise || resident.rentSchedules.at(-1)?.dueDay !== dueDay;
   const current = await RoomAllocation.findOne({ residentId: resident._id, active: true });
   const changedRoom = !current || String(current.roomId) !== String(targetRoom._id) || current.bedId !== data.bedId;
@@ -300,7 +350,7 @@ router.put('/residents/:id', requirePermission('residents:write'), async (req, r
         resident.allocations.push({ roomId: targetRoom._id, roomNumber: targetRoom.roomNumber, bedId: data.bedId, startDate: data.effectiveFrom, changedBy: new Types.ObjectId(req.user!.id), reason: 'Resident room transfer' });
       }
       if (changedRent) resident.rentSchedules.push({ version: (resident.rentSchedules.at(-1)?.version ?? 0) + 1, monthlyRentPaise: rentPaise, dueDay, effectiveFrom: data.effectiveFrom, changedBy: new Types.ObjectId(req.user!.id), reason: 'Schedule edited by operator' });
-      resident.set({ fullName: data.fullName, mobile: data.mobile, email: data.email.toLowerCase(), emergencyContact: data.emergencyContact, governmentId: data.governmentId, notes: data.notes });
+      resident.set({ fullName: data.fullName, gender: residentGender, mobile: data.mobile, email: data.email.toLowerCase(), emergencyContact: data.emergencyContact, governmentId: data.governmentId, notes: data.notes });
       await resident.save({ session });
       await AuditEvent.create([{ actorId: req.user!.id, action: changedRoom ? 'ROOM_TRANSFER' : changedRent ? 'RENT_SCHEDULE_CHANGED' : 'RESIDENT_UPDATED', entityType: 'Resident', entityId: String(resident._id), reason: changedRent ? 'Schedule updated; historical charges remain unchanged.' : '', details: { changedRent, changedRoom, effectiveFrom: data.effectiveFrom } }], { session });
     });
@@ -328,6 +378,190 @@ router.patch('/residents/:id/status', requirePermission('residents:write'), asyn
     await AuditEvent.create([{ actorId: req.user!.id, action: 'RESIDENT_STATUS_CHANGED', entityType: 'Resident', entityId: String(resident._id), reason: data.reason, details: { status: data.status } }], { session });
   });
   return res.json({ resident });
+});
+
+router.post('/residents/:id/checkout', requirePermission('residents:write'), async (req, res) => {
+  const data = z.object({
+    effectiveEndDate: date,
+    reason: z.string().trim().min(5).max(500),
+    // Kept in the request schema for compatibility with older clients. The
+    // server now calculates all deposit offsets from the saved ledger.
+    allocations: z.array(z.object({ chargeId: objectId, amountPaise: z.number().int().positive() })).max(100).default([]),
+    finalBills: z.array(z.object({ utilityType: z.string().trim().min(2).max(60), amountPaise: z.number().int().positive(), dueAt: date, notes: z.string().max(500).default(''), appliedPaise: z.number().int().nonnegative().default(0) }).and(utilityPeriodSchema)).max(10).default([]),
+    refundAmountPaise: z.number().int().nonnegative().default(0),
+    refundMethod: z.enum(['CASH', 'BANK_TRANSFER', 'UPI', 'OTHER']).default('CASH'),
+    reference: z.string().max(120).default(''),
+    idempotencyKey: z.string().uuid(),
+  }).parse(req.body);
+  const resident = await Resident.findById(req.params.id);
+  if (!resident) return res.status(404).json({ error: 'Resident not found.' });
+  if (!await residentIsInScope(req, String(resident._id))) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
+  if (resident.status === 'INACTIVE') {
+    if (resident.checkoutIdempotencyKey === data.idempotencyKey) {
+      const checkout = await ResidentCheckout.findOne({ idempotencyKey: data.idempotencyKey }).lean();
+      return res.json({ resident, checkout, duplicate: true });
+    }
+    return res.status(409).json({ error: 'This resident has already checked out.' });
+  }
+  if (data.refundAmountPaise > 0) return res.status(422).json({ error: 'Checkout does not issue deposit refunds. Any remaining deposit can be refunded after the 21-day checkout period from the checkout summary.' });
+  const result = await inTransaction(async (session) => {
+    const current = await Resident.findById(resident._id).session(session);
+    if (!current) throw Object.assign(new Error('Resident not found.'), { status: 404 });
+    if (current.status === 'INACTIVE') {
+      if (current.checkoutIdempotencyKey === data.idempotencyKey) {
+        const checkout = await ResidentCheckout.findOne({ idempotencyKey: data.idempotencyKey }).session(session).lean();
+        return { resident: current, checkout, duplicate: true };
+      }
+      throw Object.assign(new Error('This resident has already checked out.'), { status: 409 });
+    }
+    const depositEntries = await DepositTransaction.find({ residentId: current._id }).session(session).lean();
+    const depositBalance = depositEntries.reduce((sum, entry) => sum + (entry.kind === 'RECEIVED' ? entry.amountPaise : ['REFUNDED', 'APPLIED'].includes(entry.kind) ? -entry.amountPaise : 0), 0);
+    const allCharges = await Charge.find({ residentId: current._id }).sort({ dueAt: 1, issuedAt: 1, _id: 1 }).session(session);
+    const balanceOf = (charge: typeof allCharges[number]) => Math.max(0, charge.amountPaise - charge.paidPaise - (charge.externalPaidPaise ?? 0));
+    const balanceBeforeByCharge = new Map<string, number>(allCharges.map((charge): [string, number] => [String(charge._id), balanceOf(charge)]));
+    const outstandingBeforePaise = [...balanceBeforeByCharge.values()].reduce((sum, balance) => sum + balance, 0);
+    const appliedEntries: { chargeId: Types.ObjectId; amountPaise: number }[] = [];
+    const appliedByCharge = new Map<string, number>();
+    let depositAvailablePaise = Math.max(0, depositBalance);
+    let allocationTotal = 0;
+    for (const charge of allCharges) {
+      const balance = balanceBeforeByCharge.get(String(charge._id)) ?? 0;
+      const amountPaise = Math.min(balance, depositAvailablePaise);
+      if (amountPaise <= 0) continue;
+      const beforePaise = balance;
+      charge.externalPaidPaise = (charge.externalPaidPaise ?? 0) + amountPaise;
+      charge.status = chargeStatus(charge.amountPaise, charge.paidPaise + charge.externalPaidPaise, charge.dueAt);
+      charge.audit.push({ at: new Date(), by: new Types.ObjectId(req.user!.id), action: 'DEPOSIT_APPLIED', reason: data.reason, beforePaise, afterPaise: beforePaise - amountPaise });
+      await charge.save({ session });
+      appliedEntries.push({ chargeId: charge._id, amountPaise });
+      appliedByCharge.set(String(charge._id), amountPaise);
+      allocationTotal += amountPaise;
+      depositAvailablePaise -= amountPaise;
+    }
+    const finalBillCharges: { chargeId: Types.ObjectId; kind: 'UTILITY'; description: string; periodKey: string; servicePeriodStart: Date; servicePeriodEnd: Date; amountPaise: number; appliedPaise: number; remainingPaise: number }[] = [];
+    for (const [index, bill] of data.finalBills.entries()) {
+      const servicePeriod = resolveUtilityPeriod(bill);
+      const duplicateRange: Record<string, unknown> = { residentId: current._id, kind: 'UTILITY', utilityType: bill.utilityType, $or: [
+        { servicePeriodStart: { $lte: servicePeriod.servicePeriodEnd }, servicePeriodEnd: { $gte: servicePeriod.servicePeriodStart } },
+        { servicePeriodStart: null, servicePeriodEnd: null, periodKey: { $in: utilityPeriodMonthKeys(servicePeriod) } },
+      ] };
+      if (await Charge.exists(duplicateRange).session(session)) throw Object.assign(new Error(`A ${bill.utilityType} bill already exists for ${utilityPeriodDescription(servicePeriod.servicePeriodStartText, servicePeriod.servicePeriodEndText)}.`), { status: 409 });
+      const rangeLabel = utilityPeriodDescription(servicePeriod.servicePeriodStartText, servicePeriod.servicePeriodEndText);
+      const appliedPaise = Math.min(bill.amountPaise, depositAvailablePaise);
+      const [created] = await Charge.create([{ residentId: current._id, kind: 'UTILITY', utilityType: bill.utilityType, periodKey: servicePeriod.periodKey, servicePeriodStart: servicePeriod.servicePeriodStart, servicePeriodEnd: servicePeriod.servicePeriodEnd, description: `${bill.utilityType} · ${rangeLabel}${bill.notes ? ` · ${bill.notes}` : ''}`, amountPaise: bill.amountPaise, paidPaise: 0, externalPaidPaise: appliedPaise, issuedAt: new Date(), dueAt: bill.dueAt, status: chargeStatus(bill.amountPaise, appliedPaise, bill.dueAt), idempotencyKey: `checkout:${data.idempotencyKey}:bill:${index}`, createdBy: req.user!.id, audit: appliedPaise ? [{ at: new Date(), by: new Types.ObjectId(req.user!.id), action: 'DEPOSIT_APPLIED', reason: data.reason, beforePaise: bill.amountPaise, afterPaise: bill.amountPaise - appliedPaise }] : [] }], { session });
+      finalBillCharges.push({ chargeId: created!._id, kind: 'UTILITY', description: created!.description, periodKey: servicePeriod.periodKey, servicePeriodStart: servicePeriod.servicePeriodStart, servicePeriodEnd: servicePeriod.servicePeriodEnd, amountPaise: bill.amountPaise, appliedPaise, remainingPaise: bill.amountPaise - appliedPaise });
+      if (appliedPaise > 0) { appliedEntries.push({ chargeId: created!._id, amountPaise: appliedPaise }); appliedByCharge.set(String(created!._id), appliedPaise); allocationTotal += appliedPaise; depositAvailablePaise -= appliedPaise; }
+    }
+    const depositKey = `checkout:${data.idempotencyKey}`;
+    if (allocationTotal > 0) await DepositTransaction.create([{ residentId: current._id, amountPaise: allocationTotal, kind: 'APPLIED', paymentMethod: 'OTHER', reference: `checkout:${String(current._id)}`, reason: data.reason, chargeAllocations: appliedEntries, createdBy: req.user!.id, idempotencyKey: `${depositKey}:applied` }], { session });
+    const remainingDepositPaise = Math.max(0, depositBalance - allocationTotal);
+    const checkoutAllocation = await RoomAllocation.findOne({ residentId: current._id, active: true }).session(session);
+    const checkoutRoom = checkoutAllocation ? await Room.findById(checkoutAllocation.roomId).session(session).lean() : null;
+    const checkoutProperty = checkoutRoom?.propertyId ? await Property.findById(checkoutRoom.propertyId).select('name').session(session).lean() : null;
+    const checkoutCharges = allCharges.filter((charge) => (balanceBeforeByCharge.get(String(charge._id)) ?? 0) > 0).map((charge) => {
+      const amountPaise = balanceBeforeByCharge.get(String(charge._id)) ?? 0; const appliedPaise = appliedByCharge.get(String(charge._id)) ?? 0;
+      return { chargeId: charge._id, kind: charge.kind, description: charge.description, periodKey: charge.periodKey, amountPaise, appliedPaise, remainingPaise: amountPaise - appliedPaise };
+    });
+    const checkoutRecord = (await ResidentCheckout.create([{ residentId: current._id, checkoutDate: data.effectiveEndDate, checkedOutAt: new Date(), reason: data.reason, propertyName: checkoutProperty?.name ?? checkoutRoom?.propertyName ?? '', roomNumber: checkoutRoom?.roomNumber ?? '', bedId: checkoutAllocation?.bedId ?? '', outstandingBeforePaise, depositHeldPaise: depositBalance, appliedToChargesPaise: allocationTotal, refundedPaise: 0, depositRetainedPaise: remainingDepositPaise, outstandingAfterPaise: Math.max(0, outstandingBeforePaise + data.finalBills.reduce((sum, bill) => sum + bill.amountPaise, 0) - allocationTotal), charges: checkoutCharges, finalBills: finalBillCharges, idempotencyKey: data.idempotencyKey, createdBy: req.user!.id }], { session }))[0]!;
+    current.status = 'INACTIVE';
+    current.effectiveEndDate = data.effectiveEndDate;
+    current.checkoutIdempotencyKey = data.idempotencyKey;
+    if (checkoutAllocation) { checkoutAllocation.active = false; checkoutAllocation.endDate = data.effectiveEndDate; await checkoutAllocation.save({ session }); }
+    const currentRecord = current.allocations.find((item) => !item.endDate);
+    if (currentRecord) currentRecord.endDate = data.effectiveEndDate;
+    await current.save({ session });
+    await AuditEvent.create([{ actorId: req.user!.id, action: 'RESIDENT_CHECKED_OUT', entityType: 'Resident', entityId: String(current._id), reason: data.reason, details: { checkoutId: String(checkoutRecord._id), effectiveEndDate: data.effectiveEndDate, depositPaise: depositBalance, appliedToChargesPaise: allocationTotal, chargeAllocations: appliedEntries, finalBills: finalBillCharges, refundedPaise: 0, remainingDepositPaise } }], { session });
+    return { resident: current, checkout: checkoutRecord, duplicate: false, depositBalancePaise: remainingDepositPaise };
+  });
+  return res.json(result);
+});
+
+router.post('/residents/:id/checkouts/:checkoutId/refund', requirePermission('payments:write'), async (req, res) => {
+  const data = z.object({ amount: z.number().positive().max(10000000), paymentMethod: z.enum(['CASH', 'BANK_TRANSFER', 'UPI', 'OTHER']), reference: z.string().max(120).default(''), reason: z.string().trim().min(5).max(500), idempotencyKey: z.string().uuid() }).parse(req.body);
+  const resident = await Resident.findById(req.params.id).lean();
+  if (!resident) return res.status(404).json({ error: 'Resident not found.' });
+  if (!await residentIsInScope(req, String(resident._id))) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
+  const amountPaise = paiseFromRupees(data.amount);
+  const result = await inTransaction(async (session) => {
+    const checkout = await ResidentCheckout.findOne({ _id: req.params.checkoutId, residentId: resident._id }).session(session).lean();
+    if (!checkout) throw Object.assign(new Error('Checkout summary not found.'), { status: 404 });
+    const checkoutDateParts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(checkout.checkoutDate);
+    const checkoutYear = Number(checkoutDateParts.find((part) => part.type === 'year')?.value);
+    const checkoutMonth = Number(checkoutDateParts.find((part) => part.type === 'month')?.value);
+    const checkoutDay = Number(checkoutDateParts.find((part) => part.type === 'day')?.value);
+    const refundEligibleAt = new Date(Date.UTC(checkoutYear, checkoutMonth - 1, checkoutDay + 21, 12));
+    if (new Date() < refundEligibleAt) {
+      throw Object.assign(new Error(`Deposit refunds can be recorded from ${new Intl.DateTimeFormat('en-IN', { dateStyle: 'medium', timeZone: 'Asia/Kolkata' }).format(refundEligibleAt)} (21 days after checkout).`), { status: 409 });
+    }
+    const idempotencyKey = `checkout-refund:${checkout._id}:${data.idempotencyKey}`;
+    const existing = await DepositTransaction.findOne({ idempotencyKey }).session(session);
+    if (existing) return { transaction: existing, refundableRemainingPaise: null };
+    const refundableRemainingPaise = Math.max(0, checkout.depositRetainedPaise - (checkout.additionalRefundedPaise ?? 0));
+    if (amountPaise > refundableRemainingPaise) throw Object.assign(new Error('Refund cannot exceed the remaining refundable deposit for this checkout.'), { status: 409 });
+    const depositEntries = await DepositTransaction.find({ residentId: resident._id }).session(session).lean();
+    const heldDepositPaise = depositEntries.reduce((sum, entry) => sum + (entry.kind === 'RECEIVED' ? entry.amountPaise : ['REFUNDED', 'APPLIED'].includes(entry.kind) ? -entry.amountPaise : 0), 0);
+    if (amountPaise > heldDepositPaise) throw Object.assign(new Error('Refund cannot exceed the deposit currently held in the resident ledger.'), { status: 409 });
+    const reservedCheckout = await ResidentCheckout.findOneAndUpdate({ _id: checkout._id, residentId: resident._id, $expr: { $lte: [{ $add: [{ $ifNull: ['$additionalRefundedPaise', 0] }, amountPaise] }, '$depositRetainedPaise'] } }, { $inc: { additionalRefundedPaise: amountPaise } }, { new: true, session });
+    if (!reservedCheckout) throw Object.assign(new Error('This checkout has no refundable deposit balance remaining.'), { status: 409 });
+    const transaction = (await DepositTransaction.create([{ residentId: resident._id, checkoutId: checkout._id, amountPaise, kind: 'REFUNDED', paymentMethod: data.paymentMethod, reference: data.reference, reason: `Post-checkout refund: ${data.reason}`, createdBy: req.user!.id, idempotencyKey }], { session }))[0]!;
+    await AuditEvent.create([{ actorId: req.user!.id, action: 'CHECKOUT_DEPOSIT_REFUNDED', entityType: 'ResidentCheckout', entityId: String(checkout._id), reason: data.reason, details: { residentId: String(resident._id), amountPaise, paymentMethod: data.paymentMethod, reference: data.reference, refundableRemainingPaise: refundableRemainingPaise - amountPaise } }], { session });
+    return { transaction, refundableRemainingPaise: refundableRemainingPaise - amountPaise };
+  });
+  return res.status(201).json(result);
+});
+
+router.post('/residents/:id/readmit', requirePermission('residents:write'), async (req, res) => {
+  const data = z.object({ propertyId: objectId, roomId: objectId, bedId: z.string().trim().min(1).max(20), admissionDate: date, monthlyRent: z.number().positive().max(10000000), idempotencyKey: z.string().uuid() }).parse(req.body);
+  const resident = await Resident.findById(req.params.id);
+  if (!resident) return res.status(404).json({ error: 'Resident not found.' });
+  if (!await residentIsInScope(req, String(resident._id))) return res.status(403).json({ error: 'You do not have access to this resident’s records.' });
+  if (resident.status !== 'INACTIVE') return res.status(409).json({ error: 'Only checked-out residents can be readmitted.' });
+  const [property, room] = await Promise.all([Property.findOne({ _id: data.propertyId, active: true }).lean(), Room.findOne({ _id: data.roomId, propertyId: data.propertyId, active: true }).lean()]);
+  if (!property || !room || !room.beds.some((bed) => bed.bedId === data.bedId && bed.active)) return res.status(422).json({ error: 'Choose an active property, room, and bed.' });
+  if (resident.gender && property.gender && resident.gender !== property.gender) return res.status(422).json({ error: `This property is for ${property.gender.toLowerCase()} residents.` });
+  if (req.user?.role !== 'SUPER_ADMIN' && !(req.user?.propertyIds ?? []).includes(data.propertyId)) return res.status(403).json({ error: 'You do not have access to the destination property.' });
+  const businessDate = (value: Date) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(value);
+  const preserveOriginalAdmissionDate = businessDate(data.admissionDate) === businessDate(resident.admissionDate);
+  if (resident.effectiveEndDate && data.admissionDate < resident.effectiveEndDate && !preserveOriginalAdmissionDate) return res.status(422).json({ error: 'The new admission date cannot be before the previous checkout date.' });
+  const reAdmissionDate = preserveOriginalAdmissionDate ? new Date() : data.admissionDate;
+  const billingStartDate = admissionBillingStartDate(reAdmissionDate, preserveOriginalAdmissionDate ? resident.admissionDate : data.admissionDate);
+  const periodKey = periodKeyFor(billingStartDate);
+  const dueDay = billingDayForDate(preserveOriginalAdmissionDate ? resident.admissionDate : data.admissionDate);
+  const monthlyRentPaise = paiseFromRupees(data.monthlyRent);
+  try {
+    const result = await inTransaction(async (session) => {
+      const current = await Resident.findById(resident._id).session(session);
+      if (!current) throw Object.assign(new Error('Resident not found.'), { status: 404 });
+      if (current.status !== 'INACTIVE') throw Object.assign(new Error('This resident is no longer checked out.'), { status: 409 });
+      if (await RoomAllocation.exists({ roomId: room._id, bedId: data.bedId, active: true }).session(session)) throw Object.assign(new Error('That bed has just been assigned. Choose another vacant bed.'), { status: 409 });
+      const priorCheckout = await ResidentCheckout.findOne({ residentId: current._id }).sort({ checkoutDate: -1 }).session(session).lean();
+      const scheduleVersion = (current.rentSchedules.at(-1)?.version ?? 0) + 1;
+      current.status = 'ACTIVE';
+      if (!current.gender && property.gender) current.gender = property.gender;
+      if (!preserveOriginalAdmissionDate) current.admissionDate = data.admissionDate;
+      current.billingStartDate = billingStartDate;
+      current.effectiveEndDate = null;
+      current.noticeStartDate = null;
+      current.expectedDepartureDate = null;
+      current.checkoutIdempotencyKey = null;
+      current.allocations.push({ roomId: room._id, roomNumber: room.roomNumber, bedId: data.bedId, startDate: reAdmissionDate, changedBy: new Types.ObjectId(req.user!.id), reason: 'Resident readmitted after checkout' });
+      current.rentSchedules.push({ version: scheduleVersion, monthlyRentPaise, dueDay, effectiveFrom: billingStartDate, changedBy: new Types.ObjectId(req.user!.id), reason: `Readmission after checkout${priorCheckout ? ` ${priorCheckout._id}` : ''}` });
+      await RoomAllocation.create([{ residentId: current._id, roomId: room._id, bedId: data.bedId, startDate: reAdmissionDate, changedBy: req.user!.id, reason: 'Resident readmitted after checkout' }], { session });
+      const existingRent = await Charge.findOne({ residentId: current._id, kind: 'RENT', periodKey }).session(session);
+      let initialCharge = null;
+      if (!existingRent) {
+        const [charge] = await Charge.create([{ residentId: current._id, kind: 'RENT', periodKey, description: `Rent for ${periodKey}`, amountPaise: monthlyRentPaise, issuedAt: new Date(), dueAt: dueDateForPeriod(periodKey, dueDay), scheduleVersion, idempotencyKey: `rent:${current._id}:${periodKey}`, createdBy: req.user!.id }], { session });
+        initialCharge = charge;
+      }
+      await current.save({ session });
+      await AuditEvent.create([{ actorId: req.user!.id, action: 'RESIDENT_READMITTED', entityType: 'Resident', entityId: String(current._id), reason: 'Resident readmitted; prior checkout and financial settlement were retained.', details: { propertyId: data.propertyId, propertyName: property.name, roomId: String(room._id), roomNumber: room.roomNumber, bedId: data.bedId, admissionDate: current.admissionDate, reAdmissionDate, preservedOriginalAdmissionDate: preserveOriginalAdmissionDate, billingStartDate, periodKey, monthlyRentPaise, priorCheckoutId: priorCheckout ? String(priorCheckout._id) : null, priorSettlementPreserved: true, currentPeriodChargeCreated: Boolean(initialCharge) } }], { session });
+      return { resident: current, initialCharge: initialCharge ? { _id: String(initialCharge._id), periodKey, amountPaise: monthlyRentPaise, dueAt: initialCharge.dueAt } : null, priorCheckoutId: priorCheckout ? String(priorCheckout._id) : null };
+    });
+    return res.status(200).json(result);
+  } catch (error) {
+    if ((error as { code?: number }).code === 11000) return res.status(409).json({ error: 'That bed is already assigned or this period rent bill already exists. Refresh and retry.' });
+    throw error;
+  }
 });
 
 router.get('/residents/:id/preview-rent', requirePermission('residents:read'), async (req, res) => {

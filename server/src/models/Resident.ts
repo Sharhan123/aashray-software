@@ -23,6 +23,8 @@ const residentSchema = new Schema({
   residentId: { type: String, required: true, unique: true, index: true },
   admissionIdempotencyKey: { type: String, required: true, unique: true },
   fullName: { type: String, required: true, trim: true, maxlength: 140 },
+  // Existing resident records stay unassigned until their property's gender is confirmed.
+  gender: { type: String, enum: ['MALE', 'FEMALE'], default: null },
   mobile: { type: String, required: true, trim: true, maxlength: 24, index: true },
   email: { type: String, trim: true, lowercase: true, maxlength: 254, default: '' },
   governmentId: { type: String, trim: true, maxlength: 80, default: '' },
@@ -33,6 +35,7 @@ const residentSchema = new Schema({
   noticeStartDate: { type: Date, default: null },
   expectedDepartureDate: { type: Date, default: null },
   effectiveEndDate: { type: Date, default: null },
+  checkoutIdempotencyKey: { type: String, default: null },
   securityDepositPaise: { type: Number, required: true, min: 0, default: 0 },
   notes: { type: String, maxlength: 3000, default: '' },
   allocations: { type: [allocationSchema], default: [] },

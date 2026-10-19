@@ -17,6 +17,7 @@ import { chargeLedger, rentChargeLedger } from '../services/financialCalculation
 import { rentChargeMongoFilter } from '../services/rentStatus.js';
 import { previewMonthlyBilling, generateMonthlyBilling } from '../services/billingService.js';
 import { residentIsInScope, scopedResidentIds } from '../middleware/propertyAccess.js';
+import { resolveUtilityPeriod, utilityPeriodDescription, utilityPeriodMonthKeys, utilityPeriodSchema } from '../services/utilityPeriod.js';
 
 const router = Router(); router.use(requireAuth);
 const id = z.string().regex(/^[a-f\d]{24}$/i); const day = z.coerce.date();
@@ -35,7 +36,18 @@ router.get('/charges', requirePermission('billing:read'), async (req, res) => {
   if (scope.forbidden) return res.status(403).json({ error: 'You do not have access to this property.' });
   if (scope.ids !== null) { const current = filter.residentId; filter.residentId = { $in: current ? scope.ids.filter((residentId) => String(residentId) === String(current)) : scope.ids }; }
   if (req.query.kind === 'RENT' || req.query.kind === 'UTILITY' || req.query.kind === 'OPENING_BALANCE') filter.kind = req.query.kind;
-  if (req.query.period) { const period = String(req.query.period).slice(0, 7); filter.periodKey = { $in: [period, `OPENING-${period}`] }; }
+  if (req.query.period) {
+    const period = String(req.query.period).slice(0, 7);
+    if (/^\d{4}-(0[1-9]|1[0-2])$/.test(period)) {
+      const [year, month] = period.split('-').map(Number);
+      const rangeStart = new Date(Date.UTC(year!, month! - 1, 1)); const rangeEnd = new Date(Date.UTC(year!, month!, 0, 23, 59, 59, 999));
+      const conditions = Array.isArray(filter.$and) ? filter.$and as Record<string, unknown>[] : [];
+      filter.$and = [...conditions, { $or: [
+        { periodKey: { $in: [period, `OPENING-${period}`] } },
+        { servicePeriodStart: { $lte: rangeEnd }, servicePeriodEnd: { $gte: rangeStart } },
+      ] }];
+    }
+  }
   const now = new Date();
   if (req.query.rentStatus && ['CLEARED', 'OVERDUE', 'DUE_GRACE', 'UPCOMING'].includes(String(req.query.rentStatus))) {
     filter.kind = 'RENT'; Object.assign(filter, rentChargeMongoFilter(String(req.query.rentStatus) as 'CLEARED' | 'OVERDUE' | 'DUE_GRACE' | 'UPCOMING', now));
@@ -49,9 +61,9 @@ router.get('/charges', requirePermission('billing:read'), async (req, res) => {
   if (req.query.from || req.query.to) filter.dueAt = { ...(req.query.from ? { $gte: rangeDate(req.query.from) } : {}), ...(req.query.to ? { $lte: rangeDate(req.query.to, true) } : {}) };
   if (req.query.format === 'csv') {
     const rows = await Charge.find(filter).populate('residentId', 'residentId fullName').sort({ dueAt: -1 }).limit(10000).lean();
-    const columns = ['residentId', 'resident', 'kind', 'description', 'periodKey', 'dueAt', 'amountPaise', 'paidPaise', 'externalPaidPaise', 'balancePaise', 'status'];
+    const columns = ['residentId', 'resident', 'kind', 'description', 'periodKey', 'servicePeriodStart', 'servicePeriodEnd', 'dueAt', 'amountPaise', 'paidPaise', 'externalPaidPaise', 'balancePaise', 'status'];
     const escape = (value: unknown) => `"${String(value ?? '').replace(/[=+@]/g, (ch, index) => index === 0 ? `'${ch}` : ch).replaceAll('"', '""')}"`;
-    const csv = [columns.map(escape).join(','), ...rows.map((charge) => { const resident = charge.residentId as unknown as { residentId?: string; fullName?: string } | null; const ledger = charge.kind === 'RENT' ? rentChargeLedger(charge) : chargeLedger(charge); const record: Record<string, unknown> = { residentId: resident?.residentId, resident: resident?.fullName, kind: charge.kind, description: charge.description, periodKey: charge.periodKey, dueAt: charge.dueAt.toISOString(), amountPaise: charge.amountPaise, paidPaise: charge.paidPaise, externalPaidPaise: charge.externalPaidPaise ?? 0, balancePaise: ledger.balancePaise, status: ledger.status }; return columns.map((column) => escape(record[column])).join(','); })].join('\r\n');
+    const csv = [columns.map(escape).join(','), ...rows.map((charge) => { const resident = charge.residentId as unknown as { residentId?: string; fullName?: string } | null; const ledger = charge.kind === 'RENT' ? rentChargeLedger(charge) : chargeLedger(charge); const record: Record<string, unknown> = { residentId: resident?.residentId, resident: resident?.fullName, kind: charge.kind, description: charge.description, periodKey: charge.periodKey, servicePeriodStart: charge.servicePeriodStart?.toISOString(), servicePeriodEnd: charge.servicePeriodEnd?.toISOString(), dueAt: charge.dueAt.toISOString(), amountPaise: charge.amountPaise, paidPaise: charge.paidPaise, externalPaidPaise: charge.externalPaidPaise ?? 0, balancePaise: ledger.balancePaise, status: ledger.status }; return columns.map((column) => escape(record[column])).join(','); })].join('\r\n');
     res.type('text/csv'); res.setHeader('Content-Disposition', 'attachment; filename="aashray-charges.csv"'); return res.send(csv);
   }
   const [charges, total] = await Promise.all([Charge.find(filter).populate('residentId', 'residentId fullName mobile').sort({ dueAt: -1 }).skip((page - 1) * limit).limit(limit).lean(), Charge.countDocuments(filter)]);
@@ -69,7 +81,8 @@ router.get('/charges', requirePermission('billing:read'), async (req, res) => {
 });
 
 router.post('/utilities', requirePermission('utilities:write'), async (req, res) => {
-  const data = z.object({ residentId: id, propertyId: id.optional(), utilityType: z.string().trim().min(2).max(60), periodKey: z.string().regex(/^\d{4}-\d{2}$/), amount: z.number().positive().max(10000000), issuedAt: day, dueAt: day, notes: z.string().max(1000).default(''), idempotencyKey: z.string().uuid() }).parse(req.body);
+  const data = z.object({ residentId: id, propertyId: id.optional(), utilityType: z.string().trim().min(2).max(60), amount: z.number().positive().max(10000000), issuedAt: day, dueAt: day, notes: z.string().max(1000).default(''), idempotencyKey: z.string().uuid() }).and(utilityPeriodSchema).parse(req.body);
+  const servicePeriod = resolveUtilityPeriod(data);
   if (!await Resident.exists({ _id: data.residentId })) return res.status(404).json({ error: 'Resident not found.' });
   if (!await residentIsInScope(req, data.residentId)) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
   if (data.propertyId && req.user?.role !== 'SUPER_ADMIN' && !(req.user?.propertyIds ?? []).includes(data.propertyId)) return res.status(403).json({ error: 'You do not have access to this property.' });
@@ -77,11 +90,16 @@ router.post('/utilities', requirePermission('utilities:write'), async (req, res)
   const utilityIdempotencyKey = `utility:${data.idempotencyKey}`;
   const duplicateRequest = await Charge.findOne({ idempotencyKey: utilityIdempotencyKey });
   if (duplicateRequest) return res.json({ charge: duplicateRequest, duplicate: true });
-  if (await Charge.exists({ residentId: data.residentId, kind: 'UTILITY', utilityType: data.utilityType, periodKey: data.periodKey })) return res.status(409).json({ error: 'A utility charge of this type already exists for this resident and billing period.' });
+  const duplicateUtilityFilter: Record<string, unknown> = { residentId: data.residentId, kind: 'UTILITY', utilityType: data.utilityType, $or: [
+    { servicePeriodStart: { $lte: servicePeriod.servicePeriodEnd }, servicePeriodEnd: { $gte: servicePeriod.servicePeriodStart } },
+    { servicePeriodStart: null, servicePeriodEnd: null, periodKey: { $in: utilityPeriodMonthKeys(servicePeriod) } },
+  ] };
+  if (await Charge.exists(duplicateUtilityFilter)) return res.status(409).json({ error: 'A utility charge of this type already exists for this service period.' });
   try {
     const charge = await inTransaction(async (session) => {
-      const [created] = await Charge.create([{ residentId: data.residentId, kind: 'UTILITY', utilityType: data.utilityType, periodKey: data.periodKey, description: `${data.utilityType} · ${data.periodKey}${data.notes ? ` · ${data.notes}` : ''}`, amountPaise: paiseFromRupees(data.amount), issuedAt: data.issuedAt, dueAt: data.dueAt, idempotencyKey: utilityIdempotencyKey, createdBy: req.user!.id }], { session });
-      await AuditEvent.create([{ actorId: req.user!.id, action: 'UTILITY_CHARGE_CREATED', entityType: 'Charge', entityId: String(created!._id), details: { residentId: data.residentId, amountPaise: created!.amountPaise } }], { session });
+      const rangeLabel = utilityPeriodDescription(servicePeriod.servicePeriodStartText, servicePeriod.servicePeriodEndText);
+      const [created] = await Charge.create([{ residentId: data.residentId, kind: 'UTILITY', utilityType: data.utilityType, periodKey: servicePeriod.periodKey, servicePeriodStart: servicePeriod.servicePeriodStart, servicePeriodEnd: servicePeriod.servicePeriodEnd, description: `${data.utilityType} · ${rangeLabel}${data.notes ? ` · ${data.notes}` : ''}`, amountPaise: paiseFromRupees(data.amount), issuedAt: data.issuedAt, dueAt: data.dueAt, idempotencyKey: utilityIdempotencyKey, createdBy: req.user!.id }], { session });
+      await AuditEvent.create([{ actorId: req.user!.id, action: 'UTILITY_CHARGE_CREATED', entityType: 'Charge', entityId: String(created!._id), details: { residentId: data.residentId, amountPaise: created!.amountPaise, servicePeriodStart: servicePeriod.servicePeriodStart, servicePeriodEnd: servicePeriod.servicePeriodEnd } }], { session });
       return created!;
     });
     return res.status(201).json({ charge });
@@ -95,7 +113,7 @@ router.post('/deposits', requirePermission('payments:write'), async (req, res) =
   const result = await inTransaction(async (session) => {
     const resident = await Resident.findById(data.residentId).session(session); if (!resident) throw Object.assign(new Error('Resident not found.'), { status: 404 });
     const entries = await DepositTransaction.find({ residentId: resident._id }).session(session).lean();
-    const balancePaise = entries.reduce((sum, entry) => sum + (entry.kind === 'RECEIVED' ? entry.amountPaise : entry.kind === 'REFUNDED' ? -entry.amountPaise : 0), 0);
+    const balancePaise = entries.reduce((sum, entry) => sum + (entry.kind === 'RECEIVED' ? entry.amountPaise : ['REFUNDED', 'APPLIED'].includes(entry.kind) ? -entry.amountPaise : 0), 0);
     if (data.kind === 'REFUNDED' && amountPaise > balancePaise) throw Object.assign(new Error('Refund cannot exceed the security deposit currently held.'), { status: 409 });
     const idempotencyKey = `deposit:${data.idempotencyKey}`;
     const existing = await DepositTransaction.findOne({ idempotencyKey }).session(session); if (existing) return { transaction: existing, balancePaise };
@@ -217,7 +235,7 @@ router.get('/payments/:id/receipt', requirePermission('payments:read'), async (r
   if (!await residentIsInScope(req, String((payment.residentId as unknown as { _id: Types.ObjectId })._id))) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
   const [allocation, charges] = await Promise.all([
     RoomAllocation.findOne({ residentId: (payment.residentId as unknown as { _id: Types.ObjectId })._id, startDate: { $lte: payment.paymentDate }, $or: [{ endDate: null }, { endDate: { $gte: payment.paymentDate } }] }).sort({ startDate: -1 }).populate({ path: 'roomId', select: 'roomNumber propertyId propertyName', populate: { path: 'propertyId', select: 'name address' } }).lean(),
-    Charge.find({ _id: { $in: payment.allocations.map((item) => item.chargeId) } }).select('kind utilityType periodKey description amountPaise').lean(),
+    Charge.find({ _id: { $in: payment.allocations.map((item) => item.chargeId) } }).select('kind utilityType periodKey servicePeriodStart servicePeriodEnd description amountPaise').lean(),
   ]);
   const chargeMap = new Map(charges.map((charge) => [String(charge._id), charge]));
   const receiptNumber = `ASH-${payment.paymentDate.getUTCFullYear()}-${String(payment._id).toUpperCase()}`;

@@ -15,7 +15,7 @@ vi.mock('./transactions.js', () => ({ inTransaction }));
 import { admitResident } from './admissionService.js';
 
 const admission = {
-  idempotencyKey: '550e8400-e29b-41d4-a716-446655440000', fullName: 'Test Resident', mobile: '+919876543210', email: '',
+  idempotencyKey: '550e8400-e29b-41d4-a716-446655440000', fullName: 'Test Resident', gender: 'MALE' as const, mobile: '+919876543210', email: '',
   governmentId: '', emergencyContact: '', admissionDate: new Date('2023-02-28T00:00:00Z'), billingStartDate: new Date('2023-02-01T00:00:00Z'),
   roomId: '507f1f77bcf86cd799439011', bedId: '1', monthlyRent: 8500, dueDay: 31, securityDeposit: 10000, depositPaid: 5000,
   depositMethod: 'UPI' as const, notes: '',
@@ -37,6 +37,7 @@ describe('resident admission transaction', () => {
     const result = await admitResident(admission, '507f1f77bcf86cd799439013');
     expect(result.duplicate).toBe(false);
     expect(residentCreate).toHaveBeenCalledOnce();
+    expect(residentCreate.mock.calls[0]?.[0][0].gender).toBe('MALE');
     expect(allocationCreate).toHaveBeenCalledOnce();
     expect(chargeCreate).toHaveBeenCalledOnce();
     expect(chargeCreate.mock.calls[0]?.[0][0]).toMatchObject({ kind: 'RENT', periodKey: '2026-10', amountPaise: 850000, idempotencyKey: expect.stringContaining(':2026-10') });

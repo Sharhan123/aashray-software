@@ -2,6 +2,8 @@ import { Schema, model } from 'mongoose';
 
 const propertySchema = new Schema({
   name: { type: String, required: true, trim: true, maxlength: 160 },
+  // Null is retained for pre-gender properties until the owner maps them.
+  gender: { type: String, enum: ['MALE', 'FEMALE'], default: null },
   address: { type: String, trim: true, maxlength: 500, default: '' },
   contactPhone: { type: String, trim: true, maxlength: 30, default: '' },
   contactEmail: { type: String, trim: true, lowercase: true, maxlength: 254, default: '' },

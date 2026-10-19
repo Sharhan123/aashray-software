@@ -5,6 +5,8 @@ const chargeSchema = new Schema({
   kind: { type: String, enum: ['RENT', 'UTILITY', 'OPENING_BALANCE'], required: true },
   utilityType: { type: String, default: '' },
   periodKey: { type: String, required: true },
+  servicePeriodStart: { type: Date, default: null },
+  servicePeriodEnd: { type: Date, default: null },
   description: { type: String, required: true, trim: true, maxlength: 240 },
   amountPaise: { type: Number, required: true, min: 1 },
   paidPaise: { type: Number, default: 0, min: 0 },
