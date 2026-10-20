@@ -14,6 +14,7 @@ export function App() {
     <Route element={<ProtectedRoute />}><Route element={<AppShell />}>
       <Route index element={<Navigate to="/dashboard" replace />} />
       <Route path="dashboard" element={<DashboardLivePage />} />
+      <Route path="properties" element={<PropertiesPage />} />
       <Route path="properties/:id" element={<PropertiesPage />} />
       <Route path="residents" element={<ResidentsPage />} />
       <Route path="residents/:id" element={<ResidentDetailPage />} />

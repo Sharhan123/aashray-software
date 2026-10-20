@@ -7,7 +7,7 @@ import { CloseButton, ProfileButton, ThemeToggle } from '../components/ui';
 
 const mainItems = [
   { label: 'Dashboard', path: '/dashboard', icon: LayoutDashboard, permission: 'dashboard:read' },
-  { label: 'Properties', path: '/', icon: Building2, permission: 'rooms:read' },
+  { label: 'Properties', path: '/properties', icon: Building2, permission: 'rooms:read' },
   { label: 'Residents', path: '/residents', icon: Users, permission: 'residents:read' },
   { label: 'Payments', path: '/payments', icon: CreditCard, permission: 'payments:read' },
 ];
@@ -30,7 +30,7 @@ export function AppShell() {
   const doLogout = async () => { await signOut(); navigate('/login', { replace: true }); };
   const sidebar = <aside className={`sidebar ${collapsed ? 'sidebar-collapsed' : ''}`}>
     <div className="sidebar-brand"><AashrayLogo className="sidebar-brand-logo" /><span className="sidebar-compact-logo"><BrandMark /></span>{drawerOpen && <CloseButton onClick={() => setDrawerOpen(false)} />}</div>
-    <NavLink to="/" className="workspace-select"><span className="workspace-icon"><Building2 size={16} /></span><span className="workspace-label"><b>All properties</b><small>Property workspace</small></span><ChevronRight size={14} /></NavLink>
+    <NavLink to="/properties" className="workspace-select"><span className="workspace-icon"><Building2 size={16} /></span><span className="workspace-label"><b>All properties</b><small>Property workspace</small></span><ChevronRight size={14} /></NavLink>
     <nav className="side-nav" aria-label="Main navigation">{visibleMain.map((item) => <NavLink key={item.path} to={item.path} end={item.path === '/'} className={({ isActive }) => `nav-link ${isActive ? 'nav-link-active' : ''}`} onClick={() => setDrawerOpen(false)} title={collapsed ? item.label : undefined}><item.icon size={18} strokeWidth={1.9} /><span>{item.label}</span></NavLink>)}{visibleMore.length > 0 && <><button type="button" className={`nav-link nav-more-toggle ${visibleMore.some((item) => location.pathname === item.path || location.pathname.startsWith(`${item.path}/`)) ? 'nav-link-active' : ''}`} onClick={() => setMoreOpen(!moreOpen)} aria-expanded={moreOpen} title={collapsed ? 'More' : undefined}><Menu size={18} strokeWidth={1.9} /><span>More</span><ChevronRight size={14} className={moreOpen ? 'more-chevron-open' : 'more-chevron'} /></button>{moreOpen && <div className="nav-more-items">{visibleMore.map((item) => <NavLink key={item.path} to={item.path} className={({ isActive }) => `nav-link nav-link-sub ${isActive ? 'nav-link-active' : ''}`} onClick={() => setDrawerOpen(false)} title={collapsed ? item.label : undefined}><item.icon size={17} strokeWidth={1.9} /><span>{item.label}</span></NavLink>)}</div>}</>}</nav>
     <div className="sidebar-bottom"><div className="help-panel"><div className="help-icon"><Command size={16} /></div><div className="help-copy"><b>Need a hand?</b><span>We're here to help.</span></div><ChevronRight size={14} /></div><div className="sidebar-footer"><span>AH</span><small>AASHRAY HOSPITALITY<br />SURAT · GUJARAT</small><button aria-label="Collapse sidebar" onClick={() => setCollapsed(!collapsed)}>{collapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}</button></div></div>
   </aside>;

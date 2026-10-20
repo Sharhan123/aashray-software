@@ -475,3 +475,68 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,te
 .app-shell[data-theme=dark] .business-table th{color:#c3d2dd!important;border-bottom-color:#3a4b58!important}.app-shell[data-theme=dark] .business-table td{color:#c6d3dd!important;border-bottom-color:#344552!important}.app-shell[data-theme=dark] .business-table td small{color:#a9bac7!important}.app-shell[data-theme=dark] .business-table td .business-link,.app-shell[data-theme=dark] .business-table td a{color:#72bdff!important}.app-shell[data-theme=dark] .business-table td .business-link:hover,.app-shell[data-theme=dark] .business-table td a:hover{color:#a3d6ff!important}.app-shell[data-theme=dark] .business-table tbody tr:hover{background:#1d2c37!important}.app-shell[data-theme=dark] .business-table tbody tr:hover td{color:#e0eaf0!important}.app-shell[data-theme=dark] .business-table .business-status{color:#d4e0e8!important;background:#263845!important}.app-shell[data-theme=dark] .business-table .business-status.status-active{color:#7ce0ad!important;background:#193a31!important}
 .room-edit-modal{width:min(100%,720px)}.room-edit-modal .dashboard-vacancy-content{padding:20px 24px}.room-edit-form{grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:0;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none}.room-edit-form>.business-field{min-width:0}.room-edit-form>.business-field>span{color:#596f82;font-size:11px}.room-edit-form .business-input{min-height:43px}.room-edit-actions{grid-column:1/-1;display:flex;justify-content:flex-end;gap:10px;margin-top:4px;padding-top:14px;border-top:1px solid #e4ebf0}.room-edit-backdrop{z-index:1400}.app-shell[data-theme=dark] .room-edit-form>.business-field>span{color:#bdcbd5}.app-shell[data-theme=dark] .room-edit-form .business-input{border-color:#3a4d5a;background:#101820;color:#edf5f9}.app-shell[data-theme=dark] .room-edit-form .business-input option{background:#101820;color:#edf5f9}.app-shell[data-theme=dark] .room-edit-actions{border-color:#344652}
 @media(max-width:620px){.room-edit-backdrop{place-items:end center;padding:8px}.room-edit-modal{width:100%;max-height:91dvh;border-radius:16px 16px 10px 10px}.room-edit-modal .dashboard-vacancy-content{padding:15px;overflow:auto}.room-edit-form{grid-template-columns:1fr;gap:11px}.room-edit-actions{position:sticky;bottom:-15px;display:grid;grid-template-columns:1fr 1fr;margin:5px -15px -15px;padding:12px 15px;background:#fff}.app-shell[data-theme=dark] .room-edit-actions{background:#151e28}}
+
+/* Keep shared page surfaces and controls readable in dark mode across every workspace page. */
+.app-shell[data-theme=dark] .business-panel,
+.app-shell[data-theme=dark] .payments-entry-panel,
+.app-shell[data-theme=dark] .payments-history-panel,
+.app-shell[data-theme=dark] .reports-builder,
+.app-shell[data-theme=dark] .properties-property-card,
+.app-shell[data-theme=dark] .resident-card,
+.app-shell[data-theme=dark] .checkout-summary-panel {
+  color: #d6e1e8;
+  background-color: #151f29;
+  border-color: #304451;
+}
+.app-shell[data-theme=dark] .business-panel h1,
+.app-shell[data-theme=dark] .business-panel h2,
+.app-shell[data-theme=dark] .business-panel h3,
+.app-shell[data-theme=dark] .payments-entry-panel h1,
+.app-shell[data-theme=dark] .payments-entry-panel h2,
+.app-shell[data-theme=dark] .payments-history-panel h2,
+.app-shell[data-theme=dark] .reports-builder h2 {
+  color: #edf5fa;
+}
+.app-shell[data-theme=dark] .business-panel p,
+.app-shell[data-theme=dark] .business-panel label,
+.app-shell[data-theme=dark] .payments-entry-panel label,
+.app-shell[data-theme=dark] .payments-history-panel p {
+  color: #b7c6d0;
+}
+.app-shell[data-theme=dark] .business-input,
+.app-shell[data-theme=dark] input.business-input,
+.app-shell[data-theme=dark] select.business-input,
+.app-shell[data-theme=dark] textarea.business-input {
+  color: #edf5f9;
+  background-color: #101820;
+  border-color: #3a4d5a;
+  color-scheme: dark;
+}
+.app-shell[data-theme=dark] .business-input::placeholder {
+  color: #8799a7;
+  opacity: 1;
+}
+.app-shell[data-theme=dark] .business-input option {
+  color: #edf5f9;
+  background-color: #101820;
+}
+.app-shell[data-theme=dark] .business-table-wrap,
+.app-shell[data-theme=dark] .business-table {
+  background-color: #151f29;
+  border-color: #304451;
+}
+.app-shell[data-theme=dark] .business-table thead th {
+  color: #c3d2dd;
+  background-color: #1c2a35;
+  border-color: #3a4b58;
+}
+.app-shell[data-theme=dark] .business-table tbody tr {
+  background-color: #151f29;
+}
+.app-shell[data-theme=dark] .business-table tbody td {
+  color: #c6d3dd;
+  border-color: #344552;
+}
+.app-shell[data-theme=dark] .business-table tbody td small {
+  color: #a9bac7;
+}
