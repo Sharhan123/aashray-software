@@ -12,7 +12,7 @@ export function App() {
   return <Routes>
     <Route path="/login" element={state.status === 'authenticated' ? <Navigate to="/dashboard" replace /> : <LoginPage />} />
     <Route element={<ProtectedRoute />}><Route element={<AppShell />}>
-      <Route index element={<PropertiesPage />} />
+      <Route index element={<Navigate to="/dashboard" replace />} />
       <Route path="dashboard" element={<DashboardLivePage />} />
       <Route path="properties/:id" element={<PropertiesPage />} />
       <Route path="residents" element={<ResidentsPage />} />

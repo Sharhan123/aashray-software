@@ -74,8 +74,11 @@ function makeReceiptCanvas(data: ReceiptPdfData, amountWords: string, brandLogo:
   const note = [data.notes, data.reference ? `Reference: ${data.reference}` : '', data.unallocatedPaise ? `${formatMoney(data.unallocatedPaise)} is currently unallocated.` : '', data.reversedAt ? `Reversed${data.reversalReason ? `: ${data.reversalReason}` : ''}` : ''].filter(Boolean).join(' | ') || 'No additional notes.';
   const displayDate = formatDate(data.paymentDate);
 
-  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = BLUE; ctx.fillRect(0, 0, canvas.width, 18);
+  ctx.fillStyle = '#edf3f7'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#fff'; ctx.fillRect(36, 36, canvas.width - 72, canvas.height - 72);
+  const brandWash = ctx.createLinearGradient(left, 0, right, 0); brandWash.addColorStop(0, '#e9f7fa'); brandWash.addColorStop(.64, '#f7fbfd'); brandWash.addColorStop(1, '#f1effb');
+  ctx.fillStyle = brandWash; ctx.fillRect(36, 36, canvas.width - 72, 166);
+  ctx.fillStyle = BLUE; ctx.fillRect(36, 36, canvas.width - 72, 9);
 
   // Brand and document header.
   ctx.drawImage(brandLogo, left, 48, 290, 97);
@@ -90,14 +93,16 @@ function makeReceiptCanvas(data: ReceiptPdfData, amountWords: string, brandLogo:
   ctx.fillStyle = INK; ctx.font = 'bold 20px Arial, sans-serif'; ctx.fillText(displayDate, right, 274);
 
   // Amount received stands out as the primary figure.
-  ctx.fillStyle = PALE_BLUE; ctx.fillRect(left, 315, width, 180);
+  const amountWash = ctx.createLinearGradient(left, 315, right, 495); amountWash.addColorStop(0, '#eaf7fa'); amountWash.addColorStop(.7, '#f5f8fc'); amountWash.addColorStop(1, '#f2effb');
+  ctx.fillStyle = amountWash; ctx.fillRect(left, 315, width, 180);
+  ctx.strokeStyle = '#d6e8ee'; ctx.lineWidth = 2; ctx.strokeRect(left, 315, width, 180);
   ctx.fillStyle = BLUE; ctx.fillRect(left, 315, 8, 180);
   ctx.textAlign = 'left'; ctx.fillStyle = MUTED; ctx.font = 'bold 18px Arial, sans-serif'; ctx.fillText('AMOUNT RECEIVED', left + 34, 357);
   ctx.fillStyle = NAVY; ctx.font = 'bold 56px Arial, sans-serif'; ctx.fillText(formatMoney(data.amountPaise), left + 34, 425);
   ctx.fillStyle = INK; ctx.font = '19px Arial, sans-serif'; ctx.fillText('In words: ' + fitText(ctx, amountWords, width - 68), left + 34, 466);
   const statusText = data.reversedAt ? 'REVERSED' : 'PAID';
   const badgeWidth = data.reversedAt ? 150 : 112;
-  ctx.fillStyle = data.reversedAt ? '#fff0f0' : '#e5f5ed'; ctx.fillRect(right - badgeWidth - 30, 340, badgeWidth, 42);
+  ctx.fillStyle = data.reversedAt ? '#fff0f0' : '#e5f5ed'; ctx.beginPath(); ctx.roundRect(right - badgeWidth - 30, 340, badgeWidth, 42, 21); ctx.fill();
   ctx.textAlign = 'center'; ctx.fillStyle = data.reversedAt ? '#a83434' : '#19734b'; ctx.font = 'bold 17px Arial, sans-serif'; ctx.fillText(statusText, right - badgeWidth / 2 - 30, 367);
 
   // Resident details.
@@ -217,6 +222,35 @@ async function createPdf(canvas: HTMLCanvasElement) {
   return new Blob(chunks, { type: 'application/pdf' });
 }
 
+export type ReportPdfRow = Record<string, unknown>;
+export function openReportPrintView(report: string, rows: ReportPdfRow[], range: { from?: string; to?: string; propertyId?: string }, printWindow: Window | null) {
+  if (!printWindow) throw new Error('The report print window was blocked. Allow pop-ups for this site and try again.');
+  const maxRows = 1000;
+  if (rows.length > maxRows) throw new Error(`This report has ${rows.length.toLocaleString('en-IN')} rows. Print-ready PDF is limited to ${maxRows.toLocaleString('en-IN')} rows per file. Narrow the date range or download CSV for the complete report.`);
+  const columns = rows.length ? Object.keys(rows[0]!) : ['result'];
+  const generatedAt = new Intl.DateTimeFormat('en-IN', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Kolkata' }).format(new Date());
+  const escapeHtml = (value: unknown) => String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+  const formatValue = (key: string, value: unknown) => {
+    if (value === null || value === undefined || value === '') return '—';
+    if (key.toLowerCase().includes('rupees') && typeof value === 'number') return `₹${value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}(T.*)?$/.test(value)) return new Intl.DateTimeFormat('en-IN', { dateStyle: 'medium', timeZone: 'Asia/Kolkata' }).format(new Date(value));
+    if (typeof value === 'object') return JSON.stringify(value);
+    return String(value);
+  };
+  const title = report.replace(/[-_]/g, ' ').replace(/\b\w/g, (character) => character.toUpperCase());
+  const headings = columns.map((column) => `<th>${escapeHtml(column.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/_/g, ' '))}</th>`).join('');
+  const body = rows.map((row) => `<tr>${columns.map((column) => `<td>${escapeHtml(formatValue(column, row[column])) || '—'}</td>`).join('')}</tr>`).join('');
+  const rangeText = range.from || range.to ? `${range.from || 'Any start'} to ${range.to || 'Current'}` : 'All available dates';
+  printWindow.document.open();
+  printWindow.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Aashray ${escapeHtml(title)} report</title><style>
+    @page{size:A4 landscape;margin:14mm}*{box-sizing:border-box}body{margin:0;color:#20384b;font:12px Arial,sans-serif;-webkit-print-color-adjust:exact;print-color-adjust:exact}.topline{height:7px;background:linear-gradient(90deg,#1681b4,#48b2d1,#8673c5);margin-bottom:22px}.brand{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #dce7ed;padding:0 0 14px}.brand img{max-width:180px;max-height:58px;object-fit:contain}.brand span,.meta small{color:#668095;font-size:9px;font-weight:bold;letter-spacing:.14em}.heading{display:flex;justify-content:space-between;align-items:flex-end;gap:20px;margin:22px 0 14px}.heading h1{margin:0 0 5px;color:#18354b;font-size:24px}.heading p{margin:0;color:#63798b;font-size:11px}.meta{text-align:right;color:#60788b;font-size:10px;line-height:1.7}.scope{margin:0 0 13px;padding:9px 12px;border:1px solid #d9e7ed;border-radius:7px;background:#f2f8fa;color:#49677b;font-size:10px}table{width:100%;border-collapse:collapse;table-layout:fixed}thead{display:table-header-group}th{padding:9px 8px;background:#e9f3f7;color:#34566b;text-align:left;text-transform:uppercase;font-size:9px;letter-spacing:.05em;border-bottom:1px solid #cfdee5}td{padding:7px 8px;border-bottom:1px solid #e3ebef;color:#3f5567;font-size:10px;line-height:1.35;overflow-wrap:anywhere;vertical-align:top}tbody tr:nth-child(even){background:#f7fafc}tr{break-inside:avoid;page-break-inside:avoid}.foot{margin-top:15px;padding-top:9px;border-top:1px solid #dce7ed;color:#75899a;font-size:9px}.screen-note{margin:12px 0;color:#526a7d;font-size:12px}@media screen{body{max-width:1200px;margin:30px auto;padding:28px;box-shadow:0 8px 40px #132d421c}.topline{border-radius:9px}}
+    </style></head><body><div class="topline"></div><header class="brand"><img src="${escapeHtml(aashrayLogoUrl)}" alt="Aashray Hospitality"><span>OPERATIONS REPORT</span></header><section class="heading"><div><h1>${escapeHtml(title)} report</h1><p>${escapeHtml(rangeText)}</p></div><div class="meta"><small>GENERATED</small><br>${escapeHtml(generatedAt)}<br>${rows.length.toLocaleString('en-IN')} records</div></section>${range.propertyId ? `<p class="scope">Property scope: ${escapeHtml(range.propertyId)}</p>` : ''}<table><thead><tr>${headings}</tr></thead><tbody>${body || `<tr><td colspan="${Math.max(1, columns.length)}">No records found for this report and date range.</td></tr>`}</tbody></table><footer class="foot">Aashray Hospitality · Values and financial status are shown as returned by the report service.</footer><p class="screen-note">Use your browser’s print dialog and select “Save as PDF”.</p></body></html>`);
+  printWindow.document.close();
+  let printed = false;
+  const startPrint = () => { if (printed) return; printed = true; window.setTimeout(() => { if (!printWindow.closed) printWindow.print(); }, 500); };
+  printWindow.addEventListener('load', startPrint, { once: true });
+  window.setTimeout(startPrint, 1200);
+}
 function concat(chunks: Uint8Array[]) {
   const output = new Uint8Array(chunks.reduce((size, chunk) => size + chunk.length, 0));
   let offset = 0;
