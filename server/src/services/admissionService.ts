@@ -10,7 +10,7 @@ import { inTransaction } from './transactions.js';
 import { admissionBillingStartDate, billingDayForDate, dueDateForPeriod, paiseFromRupees, periodKeyFor } from './billingRules.js';
 
 export interface AdmissionInput {
-  idempotencyKey: string; fullName: string; gender?: 'MALE' | 'FEMALE'; mobile: string; email: string; governmentId: string; emergencyContact: string;
+  idempotencyKey: string; fullName: string; gender?: 'MALE' | 'FEMALE'; mobile: string; email: string; address?: string; referenceName?: string; referenceContact?: string; governmentId: string; emergencyContact: string;
   admissionDate: Date; billingStartDate: Date; roomId: string; bedId: string; monthlyRent: number; dueDay: number;
   securityDeposit: number; depositPaid: number; depositMethod: 'CASH' | 'BANK_TRANSFER' | 'UPI' | 'OTHER'; notes: string;
 }
@@ -36,7 +36,7 @@ export async function admitResident(data: AdmissionInput, actorId: string) {
   try {
     const resident = await inTransaction(async (session) => {
       const now = new Date();
-      const created = (await Resident.create([{ residentId, admissionIdempotencyKey: data.idempotencyKey, ...data, gender, billingStartDate, dueDay, email: data.email.toLowerCase(), securityDepositPaise: depositPaise, status: 'ACTIVE', createdBy: actorId, allocations: [{ roomId: room._id, roomNumber: room.roomNumber, bedId: data.bedId, startDate: data.admissionDate, changedBy: actorId }], rentSchedules: [{ version: 1, monthlyRentPaise: rentPaise, dueDay, effectiveFrom: billingStartDate, changedBy: actorId }] }], { session }))[0]!;
+      const created = (await Resident.create([{ residentId, admissionIdempotencyKey: data.idempotencyKey, ...data, address: data.address ?? '', referenceName: data.referenceName ?? '', referenceContact: data.referenceContact ?? '', gender, billingStartDate, dueDay, email: data.email.toLowerCase(), securityDepositPaise: depositPaise, status: 'ACTIVE', createdBy: actorId, allocations: [{ roomId: room._id, roomNumber: room.roomNumber, bedId: data.bedId, startDate: data.admissionDate, changedBy: actorId }], rentSchedules: [{ version: 1, monthlyRentPaise: rentPaise, dueDay, effectiveFrom: billingStartDate, changedBy: actorId }] }], { session }))[0]!;
       await RoomAllocation.create([{ residentId: created._id, roomId: room._id, bedId: data.bedId, startDate: data.admissionDate, changedBy: actorId }], { session });
       await Charge.create([{ residentId: created._id, kind: 'RENT', periodKey: month, description: `Rent for ${month}`, amountPaise: rentPaise, issuedAt: now, dueAt: dueDateForPeriod(month, dueDay), scheduleVersion: 1, idempotencyKey: `rent:${created._id}:${month}`, createdBy: actorId }], { session });
       if (depositPaidPaise > 0) await DepositTransaction.create([{ residentId: created._id, amountPaise: depositPaidPaise, kind: 'RECEIVED', paymentMethod: data.depositMethod, createdBy: actorId, reason: 'Initial security deposit', idempotencyKey: `deposit:${created._id}:initial` }], { session });

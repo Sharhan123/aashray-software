@@ -1,5 +1,6 @@
+import { asyncHandler } from '../middleware/asyncHandler.js';
 import { Router } from 'express';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { Types } from 'mongoose';
 import { Room } from '../models/Room.js';
@@ -12,6 +13,7 @@ import { DepositTransaction } from '../models/DepositTransaction.js';
 import { ResidentMigration } from '../models/ResidentMigration.js';
 import { ResidentCheckout } from '../models/ResidentCheckout.js';
 import { AuditEvent } from '../models/AuditEvent.js';
+import { ResidentTransferHistory } from '../models/ResidentTransferHistory.js';
 import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { residentIsInScope, scopedResidentIds, scopedRoomIds } from '../middleware/propertyAccess.js';
 import { inTransaction } from '../services/transactions.js';
@@ -27,7 +29,7 @@ router.use(requireAuth);
 const date = z.coerce.date();
 const objectId = z.string().regex(/^[a-f\d]{24}$/i);
 const roomInput = z.object({ propertyId: objectId.optional(), roomNumber: z.string().trim().min(1).max(40), roomType: z.enum(['AC', 'NON_AC']), capacity: z.number().int().min(1).max(30), bedIds: z.array(z.string().trim().min(1).max(20)).optional(), notes: z.string().max(1000).default('') });
-const residentInput = z.object({ fullName: z.string().trim().min(2).max(140), gender: z.enum(['MALE', 'FEMALE']).optional(), mobile: z.string().trim().min(8).max(24), email: z.string().trim().email().max(254).or(z.literal('')).default(''), governmentId: z.string().max(80).default(''), emergencyContact: z.string().max(120).default(''), admissionDate: date, billingStartDate: date, roomId: objectId, bedId: z.string().trim().min(1).max(20), monthlyRent: z.number().positive().max(10000000), dueDay: z.number().int().min(1).max(31), securityDeposit: z.number().min(0).max(10000000).default(0), depositPaid: z.number().min(0).max(10000000).default(0), depositMethod: z.enum(['CASH', 'BANK_TRANSFER', 'UPI', 'OTHER']).default('CASH'), notes: z.string().max(3000).default(''), idempotencyKey: z.string().uuid() }).superRefine((value, ctx) => { if (value.depositPaid > value.securityDeposit) ctx.addIssue({ code: 'custom', path: ['depositPaid'], message: 'Deposit received cannot exceed the agreed security deposit.' }); });
+const residentInput = z.object({ fullName: z.string().trim().min(2).max(140), gender: z.enum(['MALE', 'FEMALE']).optional(), mobile: z.string().trim().min(8).max(24), email: z.string().trim().email().max(254).or(z.literal('')).default(''), address: z.string().trim().max(500).default(''), referenceName: z.string().trim().max(140).default(''), referenceContact: z.string().trim().max(120).default(''), governmentId: z.string().max(80).default(''), emergencyContact: z.string().max(120).default(''), admissionDate: date, billingStartDate: date, roomId: objectId, bedId: z.string().trim().min(1).max(20), monthlyRent: z.number().positive().max(10000000), dueDay: z.number().int().min(1).max(31), securityDeposit: z.number().min(0).max(10000000).default(0), depositPaid: z.number().min(0).max(10000000).default(0), depositMethod: z.enum(['CASH', 'BANK_TRANSFER', 'UPI', 'OTHER']).default('CASH'), notes: z.string().max(3000).default(''), idempotencyKey: z.string().uuid() }).superRefine((value, ctx) => { if (value.depositPaid > value.securityDeposit) ctx.addIssue({ code: 'custom', path: ['depositPaid'], message: 'Deposit received cannot exceed the agreed security deposit.' }); });
 
 function parseCsv(text: string): string[][] {
   const rows: string[][] = []; let row: string[] = []; let cell = ''; let quoted = false;
@@ -51,7 +53,7 @@ async function validateResidentCsv(csv: string, allowedPropertyIds: string[] | n
   return { hash, valid, errors };
 }
 
-router.get('/rooms', requirePermission('rooms:read'), async (req, res) => {
+router.get('/rooms', requirePermission('rooms:read'), asyncHandler(async (req, res) => {
   const filter: Record<string, unknown> = {};
   const requestedPropertyId = req.query.propertyId && objectId.safeParse(req.query.propertyId).success ? String(req.query.propertyId) : undefined;
   if (requestedPropertyId) filter.propertyId = requestedPropertyId;
@@ -66,9 +68,9 @@ router.get('/rooms', requirePermission('rooms:read'), async (req, res) => {
   const allocations = await RoomAllocation.aggregate([{ $match: { active: true } }, { $group: { _id: '$roomId', occupied: { $sum: 1 }, beds: { $push: '$bedId' } } }]);
   const occ = new Map(allocations.map((a) => [String(a._id), a]));
   return res.json({ rooms: rooms.map((room) => { const o = occ.get(String(room._id)); return { ...room, occupied: o?.occupied ?? 0, available: Math.max(0, room.capacity - (o?.occupied ?? 0)), occupiedBeds: o?.beds ?? [] }; }) });
-});
+}));
 
-router.post('/rooms', requirePermission('rooms:write'), async (req, res) => {
+router.post('/rooms', requirePermission('rooms:write'), asyncHandler(async (req, res) => {
   const data = roomInput.parse(req.body);
   const property = data.propertyId ? await Property.findOne({ _id: data.propertyId, active: true }) : null;
   if (!property) return res.status(422).json({ error: 'Choose an active property before creating a room.' });
@@ -79,9 +81,9 @@ router.post('/rooms', requirePermission('rooms:write'), async (req, res) => {
   try { room = await Room.create({ ...data, propertyId: property._id, propertyName: property.name, beds: beds.map((bedId) => ({ bedId, active: true })) }); }
   catch (error) { if ((error as { code?: number }).code === 11000) return res.status(409).json({ error: 'That room number already exists in this property.' }); throw error; }
   return res.status(201).json({ room });
-});
+}));
 
-router.put('/rooms/:id', requirePermission('rooms:write'), async (req, res) => {
+router.put('/rooms/:id', requirePermission('rooms:write'), asyncHandler(async (req, res) => {
   const data = roomInput.parse(req.body);
   const room = await Room.findById(req.params.id);
   if (!room) return res.status(404).json({ error: 'Room not found.' });
@@ -99,17 +101,17 @@ router.put('/rooms/:id', requirePermission('rooms:write'), async (req, res) => {
   room.set({ ...data, propertyId: property._id, propertyName: property.name, beds: beds.map((bedId) => ({ bedId, active: true })) });
   try { await room.save(); } catch (error) { if ((error as { code?: number }).code === 11000) return res.status(409).json({ error: 'That room number already exists in this property.' }); throw error; }
   return res.json({ room });
-});
+}));
 
-router.patch('/rooms/:id/deactivate', requirePermission('rooms:write'), async (req, res) => {
+router.patch('/rooms/:id/deactivate', requirePermission('rooms:write'), asyncHandler(async (req, res) => {
   const room = await Room.findById(req.params.id);
   if (!room) return res.status(404).json({ error: 'Room not found.' });
   if (req.user?.role !== 'SUPER_ADMIN' && !(req.user?.propertyIds ?? []).includes(String(room.propertyId))) return res.status(403).json({ error: 'You do not have access to this property.' });
   if (await RoomAllocation.exists({ roomId: room._id, active: true })) return res.status(409).json({ error: 'Move residents before deactivating an occupied room.' });
   room.active = false; await room.save(); return res.json({ room });
-});
+}));
 
-router.get('/residents', requirePermission('residents:read'), async (req, res) => {
+router.get('/residents', requirePermission('residents:read'), asyncHandler(async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1); const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
   const filter: Record<string, unknown> = {};
   if (['ACTIVE', 'NOTICE', 'INACTIVE'].includes(String(req.query.status))) filter.status = req.query.status;
@@ -165,18 +167,18 @@ router.get('/residents', requirePermission('residents:read'), async (req, res) =
     const residentCharges = periodChargeMap.get(String(r._id)) ?? [];
     return { ...r, currentAllocation: allocMap.get(String(r._id)) ?? lastAllocMap.get(String(r._id)) ?? null, outstandingPaise: balanceMap.get(String(r._id)) ?? 0, currentRentPaise: [...r.rentSchedules].sort((a, b) => b.effectiveFrom.getTime() - a.effectiveFrom.getTime())[0]?.monthlyRentPaise ?? 0, rentSummary: summarizeRentCharges(residentCharges, now), rentPeriod };
   }), page, limit, total, pages: Math.ceil(total / limit) });
-});
+}));
 
 router.get('/imports/residents/template', requirePermission('residents:read'), (_req, res) => {
   res.type('text/csv'); res.setHeader('Content-Disposition', 'attachment; filename="aashray-resident-import-template.csv"');
   const templateHeaders = [...importHeaders.slice(0, 1), 'gender', ...importHeaders.slice(1)];
   return res.send(`${templateHeaders.join(',')}\r\nExample Resident,MALE,+919876543210,,,,2026-10-01,2026-10-01,101,1,8500,5,10000,0,CASH,`);
 });
-router.post('/imports/residents/preview', requirePermission('residents:write'), async (req, res) => {
+router.post('/imports/residents/preview', requirePermission('residents:write'), asyncHandler(async (req, res) => {
   const { csv } = z.object({ csv: z.string().min(1).max(1_500_000) }).parse(req.body); const result = await validateResidentCsv(csv, req.user?.role === 'SUPER_ADMIN' ? null : req.user?.propertyIds ?? []);
   return res.json({ previewId: result.hash, rows: result.valid.map(({ row, data }) => ({ row, fullName: data.fullName, mobile: data.mobile, roomId: data.roomId, bedId: data.bedId, monthlyRent: data.monthlyRent, billingStartDate: data.billingStartDate })), errors: result.errors, validCount: result.valid.length, errorCount: result.errors.length });
-});
-router.post('/imports/residents/commit', requirePermission('residents:write'), async (req, res) => {
+}));
+router.post('/imports/residents/commit', requirePermission('residents:write'), asyncHandler(async (req, res) => {
   const { csv, previewId } = z.object({ csv: z.string().min(1).max(1_500_000), previewId: z.string().length(64) }).parse(req.body); const result = await validateResidentCsv(csv, req.user?.role === 'SUPER_ADMIN' ? null : req.user?.propertyIds ?? []);
   if (result.hash !== previewId) return res.status(409).json({ error: 'The selected CSV changed after preview. Preview it again before importing.' });
   let inserted = 0; let skipped = 0; const failures = [...result.errors];
@@ -185,9 +187,9 @@ router.post('/imports/residents/commit', requirePermission('residents:write'), a
     catch (error) { failures.push({ row: row.row, message: (error as Error).message }); }
   }
   return res.json({ inserted, skipped, failed: failures.length, errors: failures });
-});
+}));
 
-router.post('/residents', requirePermission('residents:write'), async (req, res) => {
+router.post('/residents', requirePermission('residents:write'), asyncHandler(async (req, res) => {
   const data = residentInput.parse(req.body);
   const targetRoom = await Room.findById(data.roomId).select('propertyId').lean();
   if (!targetRoom) return res.status(422).json({ error: 'Choose an active room and bed.' });
@@ -201,13 +203,13 @@ router.post('/residents', requirePermission('residents:write'), async (req, res)
     }
     throw error;
   }
-});
+}));
 
-router.get('/residents/:id', requirePermission('residents:read'), async (req, res) => {
+router.get('/residents/:id', requirePermission('residents:read'), asyncHandler(async (req, res) => {
   const resident = await Resident.findById(req.params.id).lean();
   if (!resident) return res.status(404).json({ error: 'Resident not found.' });
-  if (!await residentIsInScope(req, String(resident._id))) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
-  const [allocations, charges, payments, deposits, messages, audit, migration, checkouts] = await Promise.all([
+  if (!await residentIsInScope(req, String(resident._id))) return res.status(403).json({ error: 'You do not have access to this residentâ€™s property.' });
+  const [allocations, charges, payments, deposits, messages, audit, migration, checkouts, transfers] = await Promise.all([
     RoomAllocation.find({ residentId: resident._id }).populate('roomId', 'roomNumber roomType').sort({ startDate: -1 }).lean(),
     Charge.find({ residentId: resident._id }).sort({ dueAt: -1 }).lean(),
     Payment.find({ residentId: resident._id }).sort({ paymentDate: -1 }).lean(),
@@ -216,6 +218,7 @@ router.get('/residents/:id', requirePermission('residents:read'), async (req, re
     AuditEvent.find({ entityType: 'Resident', entityId: String(resident._id) }).sort({ createdAt: -1 }).limit(100).lean(),
     ResidentMigration.findOne({ residentId: resident._id }).lean(),
     ResidentCheckout.find({ residentId: resident._id }).sort({ checkoutDate: -1 }).lean(),
+    ResidentTransferHistory.find({ residentId: resident._id }).sort({ recordedAt: -1 }).populate('performedBy', 'name').lean(),
   ]);
   const ledger = charges.map((c) => ({ ...c, ...(c.kind === 'RENT' ? rentChargeLedger(c) : chargeLedger(c)) }));
   const liveCharges = new Map(ledger.map((charge) => [String(charge._id), charge]));
@@ -261,17 +264,100 @@ router.get('/residents/:id', requirePermission('residents:read'), async (req, re
   });
   const summary = residentFinancialSummary(charges);
   const currentRentSummary = summarizeRentCharges(charges.filter((charge) => charge.kind === 'RENT' && charge.periodKey === periodKeyFor(new Date())));
-  return res.json({ resident, migration, allocations, charges: ledger, payments: payments.map((payment) => ({ ...payment, allocatedPaise: payment.reversedAt ? 0 : payment.allocations.reduce((sum, allocation) => sum + allocation.amountPaise, 0), unallocatedPaise: payment.reversedAt ? 0 : payment.amountPaise - payment.allocations.reduce((sum, allocation) => sum + allocation.amountPaise, 0) })), deposits, messages, audit, checkouts: checkoutSummaries, outstandingPaise: summary.outstandingPaise, overduePaise: summary.overdueRentPaise, rentOutstandingPaise: summary.rentOutstandingPaise, openingBalanceOutstandingPaise: summary.openingBalanceOutstandingPaise, rentSummary: currentRentSummary, pendingUtilityPaise: summary.pendingUtilityPaise, depositBalancePaise: deposits.reduce((sum, deposit) => sum + (deposit.kind === 'RECEIVED' ? deposit.amountPaise : ['REFUNDED', 'APPLIED'].includes(deposit.kind) ? -deposit.amountPaise : 0), 0) });
+  return res.json({ resident, migration, allocations, transfers, charges: ledger, payments: payments.map((payment) => ({ ...payment, allocatedPaise: payment.reversedAt ? 0 : payment.allocations.reduce((sum, allocation) => sum + allocation.amountPaise, 0), unallocatedPaise: payment.reversedAt ? 0 : payment.amountPaise - payment.allocations.reduce((sum, allocation) => sum + allocation.amountPaise, 0) })), deposits, messages, audit, checkouts: checkoutSummaries, outstandingPaise: summary.outstandingPaise, overduePaise: summary.overdueRentPaise, rentOutstandingPaise: summary.rentOutstandingPaise, openingBalanceOutstandingPaise: summary.openingBalanceOutstandingPaise, rentSummary: currentRentSummary, pendingUtilityPaise: summary.pendingUtilityPaise, depositBalancePaise: deposits.reduce((sum, deposit) => sum + (deposit.kind === 'RECEIVED' ? deposit.amountPaise : ['REFUNDED', 'APPLIED'].includes(deposit.kind) ? -deposit.amountPaise : 0), 0) });
+}));
+
+const residentTransferInput = z.object({
+  propertyId: objectId,
+  roomId: objectId,
+  bedId: z.string().trim().min(1).max(20),
+  reason: z.string().trim().max(500).default(''),
 });
+
+router.post('/residents/:id/transfers', requirePermission('residents:write'), asyncHandler(async (req, res) => {
+  const data = residentTransferInput.parse(req.body);
+  const resident = await Resident.findById(req.params.id);
+  if (!resident) return res.status(404).json({ error: 'Resident not found.' });
+  if (!await residentIsInScope(req, String(resident._id))) return res.status(403).json({ error: 'You do not have access to this residentâ€™s property.' });
+  if (!['ACTIVE', 'NOTICE'].includes(resident.status)) return res.status(409).json({ error: 'Only active residents or residents in notice can be transferred.' });
+
+  const [current, targetRoom, targetProperty] = await Promise.all([
+    RoomAllocation.findOne({ residentId: resident._id, active: true }),
+    Room.findOne({ _id: data.roomId, propertyId: data.propertyId, active: true }),
+    Property.findOne({ _id: data.propertyId, active: true }).select('_id name gender').lean(),
+  ]);
+  if (!current) return res.status(409).json({ error: 'This resident has no active bed assignment to transfer.' });
+  if (!targetProperty || !targetRoom || !targetRoom.beds.some((bed) => bed.bedId === data.bedId && bed.active)) return res.status(422).json({ error: 'Choose an active property, room, and bed that belong together.' });
+  if (req.user?.role !== 'SUPER_ADMIN' && !(req.user?.propertyIds ?? []).includes(String(targetProperty._id))) return res.status(403).json({ error: 'You do not have access to the destination property.' });
+  if (resident.gender && targetProperty.gender && resident.gender !== targetProperty.gender) return res.status(422).json({ error: `This property is for ${targetProperty.gender.toLowerCase()} residents.` });
+
+  const currentRoom = await Room.findById(current.roomId).lean();
+  const currentProperty = currentRoom?.propertyId
+    ? await Property.findById(currentRoom.propertyId).select('_id name').lean()
+    : null;
+  if (!currentRoom) return res.status(409).json({ error: 'The residentâ€™s current room assignment is invalid. Resolve it before transferring.' });
+  if (String(current.roomId) === String(targetRoom._id) && current.bedId === data.bedId) return res.status(409).json({ error: 'The resident is already assigned to that bed.' });
+
+  const effectiveAt = new Date();
+  try {
+    const transfer = await inTransaction(async (session) => {
+      const currentResident = await Resident.findById(resident._id).session(session);
+      const previous = await RoomAllocation.findOne({ residentId: resident._id, active: true }).session(session);
+      if (!currentResident || !previous || String(previous._id) !== String(current._id)) throw Object.assign(new Error('The resident assignment changed. Refresh and review the current bed.'), { status: 409 });
+      if (!['ACTIVE', 'NOTICE'].includes(currentResident.status)) throw Object.assign(new Error('Only active residents or residents in notice can be transferred.'), { status: 409 });
+      const [validRoom, validProperty] = await Promise.all([
+        Room.findOne({ _id: targetRoom._id, propertyId: targetProperty._id, active: true }).session(session),
+        Property.findOne({ _id: targetProperty._id, active: true }).select('_id name gender').session(session).lean(),
+      ]);
+      if (!validRoom?.beds.some((bed) => bed.bedId === data.bedId && bed.active) || !validProperty) throw Object.assign(new Error('The selected property, room, or bed is no longer available. Refresh and choose another bed.'), { status: 409 });
+      if (currentResident.gender && validProperty.gender && currentResident.gender !== validProperty.gender) throw Object.assign(new Error(`This property is for ${validProperty.gender.toLowerCase()} residents.`), { status: 422 });
+      const destinationOccupied = await RoomAllocation.exists({ roomId: validRoom._id, bedId: data.bedId, active: true }).session(session);
+      if (destinationOccupied) throw Object.assign(new Error('That bed has just been assigned. Refresh and choose another available bed.'), { status: 409 });
+
+      previous.active = false;
+      previous.endDate = effectiveAt;
+      await previous.save({ session });
+      const [nextAllocation] = await RoomAllocation.create([{
+        residentId: currentResident._id, roomId: validRoom._id, bedId: data.bedId,
+        startDate: effectiveAt, changedBy: req.user!.id, reason: data.reason,
+      }], { session });
+      currentResident.allocations.push({
+        roomId: validRoom._id, roomNumber: validRoom.roomNumber, bedId: data.bedId,
+        startDate: effectiveAt, changedBy: new Types.ObjectId(req.user!.id), reason: data.reason,
+      });
+      await currentResident.save({ session });
+
+      const transferType = String(currentRoom.propertyId ?? '') !== String(validProperty._id)
+        ? 'PROPERTY_TRANSFER'
+        : String(current.roomId) === String(targetRoom._id) ? 'BED_SWITCH' : 'ROOM_SWITCH';
+      const [history] = await ResidentTransferHistory.create([{
+        residentId: currentResident._id,
+        from: { propertyId: currentRoom.propertyId ?? null, propertyName: currentProperty?.name ?? '', roomId: currentRoom._id, roomNumber: currentRoom.roomNumber, bedId: previous.bedId },
+        to: { propertyId: validProperty._id, propertyName: validProperty.name, roomId: validRoom._id, roomNumber: validRoom.roomNumber, bedId: data.bedId },
+        transferType, effectiveAt, recordedAt: effectiveAt, performedBy: req.user!.id,
+        reason: data.reason, transferReference: `TR-${randomUUID()}`,
+      }], { session });
+      await AuditEvent.create([{
+        actorId: req.user!.id, action: transferType, entityType: 'Resident', entityId: String(currentResident._id), reason: data.reason,
+        details: { transferHistoryId: String(history!._id), transferReference: history!.transferReference, from: history!.from, to: history!.to, effectiveAt },
+      }], { session });
+      return { allocation: nextAllocation, history };
+    });
+    return res.status(201).json(transfer);
+  } catch (error) {
+    if ((error as { code?: number }).code === 11000) return res.status(409).json({ error: 'That bed has just been assigned. Refresh and choose another available bed.' });
+    throw error;
+  }
+}));
 
 const migrationFields = z.object({ goLiveDate: date, monthlyRent: z.number().positive().max(10000000), dueDay: z.number().int().min(1).max(31), openingArrears: z.number().min(0).max(10000000).default(0), prepaidRent: z.number().min(0).max(10000000).default(0), currentPeriodSettled: z.number().min(0).max(10000000).default(0), securityDepositHeld: z.number().min(0).max(10000000).default(0), source: z.string().trim().min(2).max(160), description: z.string().trim().min(5).max(500), depositMethod: z.enum(['CASH', 'BANK_TRANSFER', 'UPI', 'OTHER']).default('CASH') });
 const validateMigrationAmounts = (value: z.infer<typeof migrationFields>, ctx: z.RefinementCtx) => { if (value.currentPeriodSettled > value.monthlyRent) ctx.addIssue({ code: 'custom', path: ['currentPeriodSettled'], message: 'The current period settlement cannot exceed one month of rent; enter any extra prepaid amount separately.' }); };
 const migrationInput = migrationFields.superRefine(validateMigrationAmounts);
 
-router.post('/residents/:id/migration-preview', requirePermission('billing:write'), async (req, res) => {
+router.post('/residents/:id/migration-preview', requirePermission('billing:write'), asyncHandler(async (req, res) => {
   const data = migrationInput.parse(req.body); const resident = await Resident.findById(req.params.id).lean();
   if (!resident) return res.status(404).json({ error: 'Resident not found.' });
-  if (!await residentIsInScope(req, String(resident._id))) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
+  if (!await residentIsInScope(req, String(resident._id))) return res.status(403).json({ error: 'You do not have access to this residentâ€™s property.' });
   const goLiveDate = data.goLiveDate; const periodKey = periodKeyFor(goLiveDate); const rentPaise = paiseFromRupees(data.monthlyRent, true);
   const existingMigration = await ResidentMigration.findOne({ residentId: resident._id }).lean();
   const [existingCharge, existingDepositTransactions, currentCharges] = await Promise.all([
@@ -282,12 +368,12 @@ router.post('/residents/:id/migration-preview', requirePermission('billing:write
   const depositLedgerPaise = existingDepositTransactions.reduce((sum, item) => sum + (item.kind === 'RECEIVED' ? item.amountPaise : ['REFUNDED', 'APPLIED'].includes(item.kind) ? -item.amountPaise : 0), 0);
   const openingPosition = migrationOpeningPosition(paiseFromRupees(data.openingArrears, true), paiseFromRupees(data.prepaidRent, true));
   return res.json({ preview: { resident: { id: String(resident._id), residentId: resident.residentId, fullName: resident.fullName, admissionDate: resident.admissionDate, billingStartDate: resident.billingStartDate }, goLiveDate, periodKey, monthlyRentPaise: rentPaise, dueDay: billingDayForDate(resident.admissionDate), ...openingPosition, currentPeriodSettledPaise: paiseFromRupees(data.currentPeriodSettled, true), securityDepositHeldPaise: paiseFromRupees(data.securityDepositHeld, true), projectedOpeningNetPaise: openingPosition.openingBalancePaise, existingMigration: Boolean(existingMigration), existingPeriodCharge: existingCharge ? { id: String(existingCharge._id), amountPaise: existingCharge.amountPaise, paidPaise: existingCharge.paidPaise, kind: existingCharge.kind } : null, depositLedgerPaise, depositMatches: !existingDepositTransactions.length || depositLedgerPaise === paiseFromRupees(data.securityDepositHeld, true), depositWillBeRecorded: !existingDepositTransactions.length && paiseFromRupees(data.securityDepositHeld, true) > 0, recentCharges: currentCharges.map((charge) => ({ id: String(charge._id), kind: charge.kind, periodKey: charge.periodKey, amountPaise: charge.amountPaise, paidPaise: charge.paidPaise, description: charge.description })) } });
-});
+}));
 
-router.post('/residents/:id/migration', requirePermission('billing:write'), async (req, res) => {
+router.post('/residents/:id/migration', requirePermission('billing:write'), asyncHandler(async (req, res) => {
   const data = migrationFields.extend({ confirmed: z.literal(true) }).superRefine(validateMigrationAmounts).parse(req.body);
   const resident = await Resident.findById(req.params.id); if (!resident) return res.status(404).json({ error: 'Resident not found.' });
-  if (!await residentIsInScope(req, String(resident._id))) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
+  if (!await residentIsInScope(req, String(resident._id))) return res.status(403).json({ error: 'You do not have access to this residentâ€™s property.' });
   const goLiveDate = data.goLiveDate; const periodKey = periodKeyFor(goLiveDate); const rentPaise = paiseFromRupees(data.monthlyRent, true);
   const arrearsPaise = paiseFromRupees(data.openingArrears, true); const prepaidPaise = paiseFromRupees(data.prepaidRent, true); const currentSettledPaise = paiseFromRupees(data.currentPeriodSettled, true); const depositHeldPaise = paiseFromRupees(data.securityDepositHeld, true);
   const openingPosition = migrationOpeningPosition(arrearsPaise, prepaidPaise);
@@ -324,44 +410,62 @@ router.post('/residents/:id/migration', requirePermission('billing:write'), asyn
     });
   } catch (error) { if ((error as { code?: number }).code === 11000) return res.status(409).json({ error: 'A migration or opening balance already exists for this resident.' }); throw error; }
   return res.status(201).json({ migrated: true, periodKey, admissionDatePreserved: resident.admissionDate, openingArrearsPaise: arrearsPaise, prepaidRentPaise: prepaidPaise, currentPeriodSettledPaise: currentSettledPaise, securityDepositHeldPaise: depositHeldPaise });
-});
+}));
 
-router.put('/residents/:id', requirePermission('residents:write'), async (req, res) => {
-  const data = z.object({ fullName: z.string().trim().min(2).max(140), gender: z.enum(['MALE', 'FEMALE']).optional(), mobile: z.string().trim().min(8).max(24), email: z.string().email().or(z.literal('')).default(''), emergencyContact: z.string().max(120).default(''), governmentId: z.string().max(80).default(''), notes: z.string().max(3000).default(''), monthlyRent: z.number().positive().max(10000000), dueDay: z.number().int().min(1).max(31), effectiveFrom: date, roomId: objectId, bedId: z.string().min(1).max(20) }).parse(req.body);
+router.put('/residents/:id', requirePermission('residents:write'), asyncHandler(async (req, res) => {
+  const data = z.object({ fullName: z.string().trim().min(2).max(140), gender: z.enum(['MALE', 'FEMALE']).optional(), mobile: z.string().trim().min(8).max(24), email: z.string().email().or(z.literal('')).default(''), address: z.string().trim().max(500).optional(), referenceName: z.string().trim().max(140).optional(), referenceContact: z.string().trim().max(120).optional(), emergencyContact: z.string().max(120).default(''), governmentId: z.string().max(80).default(''), notes: z.string().max(3000).default(''), monthlyRent: z.number().positive().max(10000000), dueDay: z.number().int().min(1).max(31), effectiveFrom: date, roomId: objectId.optional(), bedId: z.string().min(1).max(20).optional() }).parse(req.body);
+  if (Boolean(data.roomId) !== Boolean(data.bedId)) return res.status(422).json({ error: 'Choose both a room and bed, or leave the current assignment unchanged.' });
   const now = new Date(); const nextPeriodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
   if (data.effectiveFrom < nextPeriodStart || data.effectiveFrom.getUTCDate() !== 1) return res.status(422).json({ error: 'Rent schedule changes must start on the first day of a future billing period. Previously issued charges are never rewritten.' });
-  const [resident, targetRoom] = await Promise.all([Resident.findById(req.params.id), Room.findOne({ _id: req.body.roomId, active: true })]);
+  const [resident, targetRoom] = await Promise.all([Resident.findById(req.params.id), data.roomId ? Room.findOne({ _id: data.roomId, active: true }) : Promise.resolve(null)]);
   if (!resident) return res.status(404).json({ error: 'Resident not found.' });
-  if (!await residentIsInScope(req, String(resident._id))) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
-  if (!targetRoom || !targetRoom.beds.some((b) => b.bedId === data.bedId && b.active)) return res.status(422).json({ error: 'Select an active room and bed.' });
-  if (req.user?.role !== 'SUPER_ADMIN' && !(req.user?.propertyIds ?? []).includes(String(targetRoom.propertyId ?? ''))) return res.status(403).json({ error: 'You do not have access to the destination property.' });
-  const targetProperty = targetRoom.propertyId ? await Property.findById(targetRoom.propertyId).select('gender').lean() : null;
-  const residentGender = data.gender ?? resident.gender ?? targetProperty?.gender ?? undefined;
+  if (!await residentIsInScope(req, String(resident._id))) return res.status(403).json({ error: 'You do not have access to this residentâ€™s property.' });
+  if (targetRoom && !targetRoom.beds.some((b) => b.bedId === data.bedId && b.active)) return res.status(422).json({ error: 'Select an active bed in the selected room.' });
+  if (data.roomId && !targetRoom) return res.status(422).json({ error: 'Select an active room.' });
+  if (targetRoom && req.user?.role !== 'SUPER_ADMIN' && !(req.user?.propertyIds ?? []).includes(String(targetRoom.propertyId ?? ''))) return res.status(403).json({ error: 'You do not have access to the destination property.' });
+  const targetProperty = targetRoom?.propertyId ? await Property.findById(targetRoom.propertyId).select('gender name').lean() : null;
+  const residentGender = data.gender ?? resident.gender;
   if (residentGender && targetProperty?.gender && residentGender !== targetProperty.gender) return res.status(422).json({ error: `This property is for ${targetProperty.gender.toLowerCase()} residents.` });
   const rentPaise = paiseFromRupees(data.monthlyRent); const dueDay = billingDayForDate(resident.admissionDate); const changedRent = resident.rentSchedules.at(-1)?.monthlyRentPaise !== rentPaise || resident.rentSchedules.at(-1)?.dueDay !== dueDay;
   const current = await RoomAllocation.findOne({ residentId: resident._id, active: true });
-  const changedRoom = !current || String(current.roomId) !== String(targetRoom._id) || current.bedId !== data.bedId;
+  const changedRoom = Boolean(targetRoom && (!current || String(current.roomId) !== String(targetRoom._id) || current.bedId !== data.bedId));
+  const previousRoom = changedRoom && current ? await Room.findById(current.roomId).lean() : null;
+  const previousProperty = previousRoom?.propertyId ? await Property.findById(previousRoom.propertyId).select('_id name').lean() : null;
   try {
     await inTransaction(async (session) => {
-      if (changedRoom) {
+      if (changedRoom && targetRoom) {
         const previous = await RoomAllocation.findOne({ residentId: resident._id, active: true }).session(session);
+        if ((current && (!previous || String(previous._id) !== String(current._id))) || (!current && previous)) throw Object.assign(new Error('The resident assignment changed. Refresh and review the current bed.'), { status: 409 });
         if (previous) { previous.active = false; previous.endDate = data.effectiveFrom; await previous.save({ session }); }
         await RoomAllocation.create([{ residentId: resident._id, roomId: targetRoom._id, bedId: data.bedId, startDate: data.effectiveFrom, changedBy: req.user!.id, reason: 'Resident room transfer' }], { session });
         resident.allocations.push({ roomId: targetRoom._id, roomNumber: targetRoom.roomNumber, bedId: data.bedId, startDate: data.effectiveFrom, changedBy: new Types.ObjectId(req.user!.id), reason: 'Resident room transfer' });
+        if (previous && previousRoom) {
+          const transferType = String(previousRoom.propertyId ?? '') !== String(targetProperty?._id ?? '')
+            ? 'PROPERTY_TRANSFER'
+            : String(previous.roomId) === String(targetRoom._id) ? 'BED_SWITCH' : 'ROOM_SWITCH';
+          const [history] = await ResidentTransferHistory.create([{
+            residentId: resident._id,
+            from: { propertyId: previousRoom.propertyId ?? null, propertyName: previousProperty?.name ?? '', roomId: previousRoom._id, roomNumber: previousRoom.roomNumber, bedId: previous.bedId },
+            to: { propertyId: targetProperty?._id ?? null, propertyName: targetProperty?.name ?? '', roomId: targetRoom._id, roomNumber: targetRoom.roomNumber, bedId: data.bedId },
+            transferType, effectiveAt: data.effectiveFrom, recordedAt: new Date(), performedBy: req.user!.id,
+            reason: 'Resident room transfer', transferReference: `TR-${randomUUID()}`,
+          }], { session });
+          await AuditEvent.create([{ actorId: req.user!.id, action: transferType, entityType: 'Resident', entityId: String(resident._id), reason: 'Resident room transfer', details: { transferHistoryId: String(history!._id), transferReference: history!.transferReference, effectiveAt: data.effectiveFrom } }], { session });
+        }
       }
       if (changedRent) resident.rentSchedules.push({ version: (resident.rentSchedules.at(-1)?.version ?? 0) + 1, monthlyRentPaise: rentPaise, dueDay, effectiveFrom: data.effectiveFrom, changedBy: new Types.ObjectId(req.user!.id), reason: 'Schedule edited by operator' });
-      resident.set({ fullName: data.fullName, gender: residentGender, mobile: data.mobile, email: data.email.toLowerCase(), emergencyContact: data.emergencyContact, governmentId: data.governmentId, notes: data.notes });
+      resident.set({ fullName: data.fullName, gender: residentGender, mobile: data.mobile, email: data.email.toLowerCase(), ...(data.address !== undefined ? { address: data.address } : {}), ...(data.referenceName !== undefined ? { referenceName: data.referenceName } : {}), ...(data.referenceContact !== undefined ? { referenceContact: data.referenceContact } : {}), emergencyContact: data.emergencyContact, governmentId: data.governmentId, notes: data.notes });
       await resident.save({ session });
-      await AuditEvent.create([{ actorId: req.user!.id, action: changedRoom ? 'ROOM_TRANSFER' : changedRent ? 'RENT_SCHEDULE_CHANGED' : 'RESIDENT_UPDATED', entityType: 'Resident', entityId: String(resident._id), reason: changedRent ? 'Schedule updated; historical charges remain unchanged.' : '', details: { changedRent, changedRoom, effectiveFrom: data.effectiveFrom } }], { session });
+       if (!changedRoom || !current) await AuditEvent.create([{ actorId: req.user!.id, action: changedRent ? 'RENT_SCHEDULE_CHANGED' : 'RESIDENT_UPDATED', entityType: 'Resident', entityId: String(resident._id), reason: changedRent ? 'Schedule updated; historical charges remain unchanged.' : '', details: { changedRent, changedRoom, effectiveFrom: data.effectiveFrom } }], { session });
     });
   } catch (error) { if ((error as { code?: number }).code === 11000) return res.status(409).json({ error: 'That bed is already occupied.' }); throw error; }
   return res.json({ resident });
-});
+}));
 
-router.patch('/residents/:id/status', requirePermission('residents:write'), async (req, res) => {
+router.patch('/residents/:id/status', requirePermission('residents:write'), asyncHandler(async (req, res) => {
   const data = z.object({ status: z.enum(['ACTIVE', 'NOTICE', 'INACTIVE']), noticeStartDate: date.optional(), expectedDepartureDate: date.optional(), effectiveEndDate: date.optional(), reason: z.string().max(500).default('') }).parse(req.body);
   const resident = await Resident.findById(req.params.id); if (!resident) return res.status(404).json({ error: 'Resident not found.' });
-  if (!await residentIsInScope(req, String(resident._id))) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
+  if (!await residentIsInScope(req, String(resident._id))) return res.status(403).json({ error: 'You do not have access to this residentâ€™s property.' });
   if (data.status === 'ACTIVE' && resident.status === 'INACTIVE') return res.status(409).json({ error: 'A checked-out resident needs a new room allocation before reactivation.' });
   await inTransaction(async (session) => {
     resident.status = data.status;
@@ -378,9 +482,9 @@ router.patch('/residents/:id/status', requirePermission('residents:write'), asyn
     await AuditEvent.create([{ actorId: req.user!.id, action: 'RESIDENT_STATUS_CHANGED', entityType: 'Resident', entityId: String(resident._id), reason: data.reason, details: { status: data.status } }], { session });
   });
   return res.json({ resident });
-});
+}));
 
-router.post('/residents/:id/checkout', requirePermission('residents:write'), async (req, res) => {
+router.post('/residents/:id/checkout', requirePermission('residents:write'), asyncHandler(async (req, res) => {
   const data = z.object({
     effectiveEndDate: date,
     reason: z.string().trim().min(5).max(500),
@@ -395,7 +499,7 @@ router.post('/residents/:id/checkout', requirePermission('residents:write'), asy
   }).parse(req.body);
   const resident = await Resident.findById(req.params.id);
   if (!resident) return res.status(404).json({ error: 'Resident not found.' });
-  if (!await residentIsInScope(req, String(resident._id))) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
+  if (!await residentIsInScope(req, String(resident._id))) return res.status(403).json({ error: 'You do not have access to this residentâ€™s property.' });
   if (resident.status === 'INACTIVE') {
     if (resident.checkoutIdempotencyKey === data.idempotencyKey) {
       const checkout = await ResidentCheckout.findOne({ idempotencyKey: data.idempotencyKey }).lean();
@@ -448,7 +552,7 @@ router.post('/residents/:id/checkout', requirePermission('residents:write'), asy
       if (await Charge.exists(duplicateRange).session(session)) throw Object.assign(new Error(`A ${bill.utilityType} bill already exists for ${utilityPeriodDescription(servicePeriod.servicePeriodStartText, servicePeriod.servicePeriodEndText)}.`), { status: 409 });
       const rangeLabel = utilityPeriodDescription(servicePeriod.servicePeriodStartText, servicePeriod.servicePeriodEndText);
       const appliedPaise = Math.min(bill.amountPaise, depositAvailablePaise);
-      const [created] = await Charge.create([{ residentId: current._id, kind: 'UTILITY', utilityType: bill.utilityType, periodKey: servicePeriod.periodKey, servicePeriodStart: servicePeriod.servicePeriodStart, servicePeriodEnd: servicePeriod.servicePeriodEnd, description: `${bill.utilityType} · ${rangeLabel}${bill.notes ? ` · ${bill.notes}` : ''}`, amountPaise: bill.amountPaise, paidPaise: 0, externalPaidPaise: appliedPaise, issuedAt: new Date(), dueAt: bill.dueAt, status: chargeStatus(bill.amountPaise, appliedPaise, bill.dueAt), idempotencyKey: `checkout:${data.idempotencyKey}:bill:${index}`, createdBy: req.user!.id, audit: appliedPaise ? [{ at: new Date(), by: new Types.ObjectId(req.user!.id), action: 'DEPOSIT_APPLIED', reason: data.reason, beforePaise: bill.amountPaise, afterPaise: bill.amountPaise - appliedPaise }] : [] }], { session });
+      const [created] = await Charge.create([{ residentId: current._id, kind: 'UTILITY', utilityType: bill.utilityType, periodKey: servicePeriod.periodKey, servicePeriodStart: servicePeriod.servicePeriodStart, servicePeriodEnd: servicePeriod.servicePeriodEnd, description: `${bill.utilityType} Â· ${rangeLabel}${bill.notes ? ` Â· ${bill.notes}` : ''}`, amountPaise: bill.amountPaise, paidPaise: 0, externalPaidPaise: appliedPaise, issuedAt: new Date(), dueAt: bill.dueAt, status: chargeStatus(bill.amountPaise, appliedPaise, bill.dueAt), idempotencyKey: `checkout:${data.idempotencyKey}:bill:${index}`, createdBy: req.user!.id, audit: appliedPaise ? [{ at: new Date(), by: new Types.ObjectId(req.user!.id), action: 'DEPOSIT_APPLIED', reason: data.reason, beforePaise: bill.amountPaise, afterPaise: bill.amountPaise - appliedPaise }] : [] }], { session });
       finalBillCharges.push({ chargeId: created!._id, kind: 'UTILITY', description: created!.description, periodKey: servicePeriod.periodKey, servicePeriodStart: servicePeriod.servicePeriodStart, servicePeriodEnd: servicePeriod.servicePeriodEnd, amountPaise: bill.amountPaise, appliedPaise, remainingPaise: bill.amountPaise - appliedPaise });
       if (appliedPaise > 0) { appliedEntries.push({ chargeId: created!._id, amountPaise: appliedPaise }); appliedByCharge.set(String(created!._id), appliedPaise); allocationTotal += appliedPaise; depositAvailablePaise -= appliedPaise; }
     }
@@ -474,13 +578,13 @@ router.post('/residents/:id/checkout', requirePermission('residents:write'), asy
     return { resident: current, checkout: checkoutRecord, duplicate: false, depositBalancePaise: remainingDepositPaise };
   });
   return res.json(result);
-});
+}));
 
-router.post('/residents/:id/checkouts/:checkoutId/refund', requirePermission('payments:write'), async (req, res) => {
+router.post('/residents/:id/checkouts/:checkoutId/refund', requirePermission('payments:write'), asyncHandler(async (req, res) => {
   const data = z.object({ amount: z.number().positive().max(10000000), paymentMethod: z.enum(['CASH', 'BANK_TRANSFER', 'UPI', 'OTHER']), reference: z.string().max(120).default(''), reason: z.string().trim().min(5).max(500), idempotencyKey: z.string().uuid() }).parse(req.body);
   const resident = await Resident.findById(req.params.id).lean();
   if (!resident) return res.status(404).json({ error: 'Resident not found.' });
-  if (!await residentIsInScope(req, String(resident._id))) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
+  if (!await residentIsInScope(req, String(resident._id))) return res.status(403).json({ error: 'You do not have access to this residentâ€™s property.' });
   const amountPaise = paiseFromRupees(data.amount);
   const result = await inTransaction(async (session) => {
     const checkout = await ResidentCheckout.findOne({ _id: req.params.checkoutId, residentId: resident._id }).session(session).lean();
@@ -508,13 +612,13 @@ router.post('/residents/:id/checkouts/:checkoutId/refund', requirePermission('pa
     return { transaction, refundableRemainingPaise: refundableRemainingPaise - amountPaise };
   });
   return res.status(201).json(result);
-});
+}));
 
-router.post('/residents/:id/readmit', requirePermission('residents:write'), async (req, res) => {
+router.post('/residents/:id/readmit', requirePermission('residents:write'), asyncHandler(async (req, res) => {
   const data = z.object({ propertyId: objectId, roomId: objectId, bedId: z.string().trim().min(1).max(20), admissionDate: date, monthlyRent: z.number().positive().max(10000000), idempotencyKey: z.string().uuid() }).parse(req.body);
   const resident = await Resident.findById(req.params.id);
   if (!resident) return res.status(404).json({ error: 'Resident not found.' });
-  if (!await residentIsInScope(req, String(resident._id))) return res.status(403).json({ error: 'You do not have access to this resident’s records.' });
+  if (!await residentIsInScope(req, String(resident._id))) return res.status(403).json({ error: 'You do not have access to this residentâ€™s records.' });
   if (resident.status !== 'INACTIVE') return res.status(409).json({ error: 'Only checked-out residents can be readmitted.' });
   const [property, room] = await Promise.all([Property.findOne({ _id: data.propertyId, active: true }).lean(), Room.findOne({ _id: data.roomId, propertyId: data.propertyId, active: true }).lean()]);
   if (!property || !room || !room.beds.some((bed) => bed.bedId === data.bedId && bed.active)) return res.status(422).json({ error: 'Choose an active property, room, and bed.' });
@@ -562,15 +666,15 @@ router.post('/residents/:id/readmit', requirePermission('residents:write'), asyn
     if ((error as { code?: number }).code === 11000) return res.status(409).json({ error: 'That bed is already assigned or this period rent bill already exists. Refresh and retry.' });
     throw error;
   }
-});
+}));
 
-router.get('/residents/:id/preview-rent', requirePermission('residents:read'), async (req, res) => {
+router.get('/residents/:id/preview-rent', requirePermission('residents:read'), asyncHandler(async (req, res) => {
   const data = z.object({ billingStartDate: date, dueDay: z.coerce.number().int().min(1).max(31), monthlyRent: z.coerce.number().positive() }).parse(req.query);
   const resident = await Resident.findById(req.params.id).select('admissionDate').lean();
   if (!resident) return res.status(404).json({ error: 'Resident not found.' });
-  if (!await residentIsInScope(req, String(req.params.id))) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
+  if (!await residentIsInScope(req, String(req.params.id))) return res.status(403).json({ error: 'You do not have access to this residentâ€™s property.' });
   const periodKey = periodKeyFor(data.billingStartDate);
   return res.json({ policy: 'FULL_MONTH', periodKey, amountPaise: paiseFromRupees(data.monthlyRent), dueAt: dueDateForPeriod(periodKey, billingDayForDate(resident.admissionDate)) });
-});
+}));
 
 export default router;

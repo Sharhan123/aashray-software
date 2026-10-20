@@ -1,3 +1,4 @@
+import { asyncHandler } from '../middleware/asyncHandler.js';
 import { Router } from 'express';
 import { z } from 'zod';
 import { Types } from 'mongoose';
@@ -24,7 +25,7 @@ const router = Router(); router.use(requireAuth);
 const defaultRentReminderTemplate = 'Hello {residentName}, there is a rent due of {amount} from Aashray Paying Guest for {month}. Please pay it within 5 days of the due date ({dueDate}). Thank you.';
 const safeUser = (user: { id?: string; name: string; email: string; role: string; active: boolean; permissions: string[]; propertyIds?: unknown[]; lastLoginAt?: Date | null; createdAt?: Date }) => ({ id: user.id, name: user.name, email: user.email, role: user.role, active: user.active, permissions: user.permissions, propertyIds: (user.propertyIds ?? []).map(String), lastLoginAt: user.lastLoginAt, createdAt: user.createdAt });
 
-router.get('/dashboard', requirePermission('dashboard:read'), async (req, res) => {
+router.get('/dashboard', requirePermission('dashboard:read'), asyncHandler(async (req, res) => {
   const now = new Date(); const { start: monthStart, end: monthEnd } = businessMonthRange(now); const currentPeriod = periodKeyFor(now);
   const residentScope = await scopedResidentIds(req); const roomScope = await scopedRoomIds(req);
   const residentFilter = residentScope.ids === null ? {} : { _id: { $in: residentScope.ids } };
@@ -96,12 +97,12 @@ router.get('/dashboard', requirePermission('dashboard:read'), async (req, res) =
     return { residentId: String(resident._id), residentCode: resident.residentId, fullName: resident.fullName, outstandingRentPaise: rentSummary.balancePaise, dueAt: rentSummary.dueAt, daysPastDue: rentSummary.daysPastDue, roomNumber: room?.roomNumber ?? '', bedId: allocation?.bedId ?? '', propertyName: room?.propertyName ?? '' };
   });
   return res.json({ period: { start: monthStart, end: monthEnd, periodKey: currentPeriod }, metrics: { activeResidents, totalBeds: totalBeds[0]?.total ?? 0, occupiedBeds, availableBeds: Math.max(0, (totalBeds[0]?.total ?? 0) - occupiedBeds), genderBreakdown, rentBilledPaise: rentBilled[0]?.total ?? 0, rentCollectedPaise: (rentCollected[0]?.total ?? 0) + (externalRentCollected[0]?.total ?? 0), outstandingRentPaise: legacyRent, totalOutstandingRentPaise: rentOutstanding[0]?.total ?? 0, openingBalanceOutstandingPaise: openingOutstanding[0]?.total ?? 0, overdueRentPaise: overdueBalances[0]?.total ?? 0, overdueRentResidentCount: overdueResidentIds.length, pendingUtilityPaise: utilityPending[0]?.total ?? 0 }, overdueFollowUps, upcomingDues, recentPayments, recentAdmissions });
-});
+}));
 
-router.get('/staff', requirePermission('staff:read'), async (_req, res) => {
+router.get('/staff', requirePermission('staff:read'), asyncHandler(async (_req, res) => {
   const staff = await User.find({ role: 'STAFF' }).sort({ createdAt: -1 }).lean(); return res.json({ staff: staff.map((u) => safeUser({ ...u, id: String(u._id) })) });
-});
-router.post('/staff', requirePermission('staff:write'), requireRole('SUPER_ADMIN'), async (req, res) => {
+}));
+router.post('/staff', requirePermission('staff:write'), requireRole('SUPER_ADMIN'), asyncHandler(async (req, res) => {
   const data = z.object({ name: z.string().trim().min(2).max(120), email: z.string().trim().email().max(254), password: z.string().min(14).max(200), permissions: z.array(z.enum(STAFF_PERMISSIONS)).default([]), propertyIds: z.array(z.string().regex(/^[a-f\d]{24}$/i)).default([]) }).parse(req.body);
   const propertyIds = [...new Set(data.propertyIds)];
   const email = data.email.toLowerCase();
@@ -117,8 +118,8 @@ router.post('/staff', requirePermission('staff:write'), requireRole('SUPER_ADMIN
   }
   await AuditEvent.create({ actorId: req.user!.id, action: 'STAFF_CREATED', entityType: 'User', entityId: String(staff._id), details: { permissions: staff.permissions, propertyIds: propertyIds.map(String) } });
   return res.status(201).json({ staff: safeUser({ ...staff.toObject(), id: String(staff._id) }) });
-});
-router.patch('/staff/:id', requirePermission('staff:write'), requireRole('SUPER_ADMIN'), async (req, res) => {
+}));
+router.patch('/staff/:id', requirePermission('staff:write'), requireRole('SUPER_ADMIN'), asyncHandler(async (req, res) => {
   const data = z.object({ active: z.boolean().optional(), permissions: z.array(z.enum(STAFF_PERMISSIONS)).optional(), propertyIds: z.array(z.string().regex(/^[a-f\d]{24}$/i)).optional() }).refine((d) => d.active !== undefined || d.permissions !== undefined || d.propertyIds !== undefined).parse(req.body);
   const staff = await User.findOne({ _id: req.params.id, role: 'STAFF' }); if (!staff) return res.status(404).json({ error: 'Staff account not found.' });
   const propertyIds = data.propertyIds === undefined ? undefined : [...new Set(data.propertyIds)];
@@ -131,28 +132,28 @@ router.patch('/staff/:id', requirePermission('staff:write'), requireRole('SUPER_
   if (!staff.active) await Session.deleteMany({ userId: staff._id });
   await AuditEvent.create({ actorId: req.user!.id, action: 'STAFF_UPDATED', entityType: 'User', entityId: String(staff._id), details: { active: staff.active, permissions: staff.permissions, propertyIds: staff.propertyIds.map(String) } });
   return res.json({ staff: safeUser({ ...staff.toObject(), id: String(staff._id) }) });
-});
-router.post('/staff/:id/reset-password', requirePermission('staff:write'), requireRole('SUPER_ADMIN'), async (req, res) => {
+}));
+router.post('/staff/:id/reset-password', requirePermission('staff:write'), requireRole('SUPER_ADMIN'), asyncHandler(async (req, res) => {
   const { password } = z.object({ password: z.string().min(14).max(200) }).parse(req.body);
   const staff = await User.findOne({ _id: req.params.id, role: 'STAFF' }).select('+passwordHash'); if (!staff) return res.status(404).json({ error: 'Staff account not found.' });
   staff.passwordHash = await argon2.hash(password, { type: argon2.argon2id }); await staff.save(); await Session.deleteMany({ userId: staff._id });
   await AuditEvent.create({ actorId: req.user!.id, action: 'STAFF_PASSWORD_RESET', entityType: 'User', entityId: String(staff._id) }); return res.status(204).end();
-});
+}));
 
-router.get('/settings', requirePermission('settings:read'), async (_req, res) => {
+router.get('/settings', requirePermission('settings:read'), asyncHandler(async (_req, res) => {
   const settings = await AppSettings.findOneAndUpdate({ key: 'main' }, { $setOnInsert: { key: 'main' } }, { new: true, upsert: true, setDefaultsOnInsert: true }).lean();
   return res.json({ settings: { ...settings, whatsappConfigured: Boolean(process.env.WHATSAPP_ACCESS_TOKEN && settings.whatsappPhoneNumberId), whatsappAccessToken: undefined } });
-});
-router.put('/settings', requirePermission('settings:write'), requireRole('SUPER_ADMIN'), async (req, res) => {
+}));
+router.put('/settings', requirePermission('settings:write'), requireRole('SUPER_ADMIN'), asyncHandler(async (req, res) => {
   const data = z.object({ businessName: z.string().trim().min(2).max(160), contactPhone: z.string().max(30), contactEmail: z.string().email().or(z.literal('')), timezone: z.literal('Asia/Kolkata'), reminderOffsets: z.array(z.number().int().min(-30).max(30)).max(10), paymentMethods: z.array(z.enum(['CASH', 'BANK_TRANSFER', 'UPI', 'OTHER'])).min(1), utilityTypes: z.array(z.string().trim().min(2).max(60)).max(20), rentReminderTemplate: z.string().trim().min(20).max(1000).optional(), whatsappPhoneNumberId: z.string().max(100), whatsappBusinessAccountId: z.string().max(100), whatsappAutoRemindersEnabled: z.boolean() }).parse(req.body);
   if (data.whatsappAutoRemindersEnabled) return res.status(422).json({ error: 'Automated WhatsApp delivery stays disabled until an audited template, recipient consent, webhook, and delivery workflow are configured.' });
   const { rentReminderTemplate, ...settingsData } = data;
   const settings = await AppSettings.findOneAndUpdate({ key: 'main' }, { $set: { ...settingsData, ...(rentReminderTemplate === undefined ? {} : { rentReminderTemplate }), whatsappEnabled: Boolean(process.env.WHATSAPP_ACCESS_TOKEN && data.whatsappPhoneNumberId) } }, { new: true, upsert: true, runValidators: true }).lean();
   await AuditEvent.create({ actorId: req.user!.id, action: 'SETTINGS_UPDATED', entityType: 'AppSettings', entityId: 'main' });
   return res.json({ settings: { ...settings, whatsappConfigured: Boolean(process.env.WHATSAPP_ACCESS_TOKEN && settings.whatsappPhoneNumberId), whatsappAccessToken: undefined } });
-});
+}));
 
-router.post('/messages/prepare', requirePermission('messages:send'), async (req, res) => {
+router.post('/messages/prepare', requirePermission('messages:send'), asyncHandler(async (req, res) => {
   const data = z.object({ residentId: z.string().regex(/^[a-f\d]{24}$/i), propertyId: z.string().regex(/^[a-f\d]{24}$/i).optional(), messageType: z.enum(['RENT_REMINDER', 'OVERDUE', 'UTILITY', 'CUSTOM']), customMessage: z.string().max(4000).default('') }).parse(req.body);
   const resident = await Resident.findById(data.residentId).lean(); if (!resident) return res.status(404).json({ error: 'Resident not found.' });
   if (!await residentIsInScope(req, data.residentId)) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
@@ -197,23 +198,23 @@ router.post('/messages/prepare', requirePermission('messages:send'), async (req,
   const log = await MessageLog.create({ residentId: resident._id, authorId: req.user!.id, recipient: resident.mobile, messageType: data.messageType, message, deliveryMechanism: 'WHATSAPP_CLICK_TO_CHAT', status: 'PREPARED' });
   const digits = resident.mobile.replace(/\D/g, '').replace(/^0+/, ''); const phone = digits.length === 10 ? `91${digits}` : digits;
   return res.status(201).json({ message: log, whatsappUrl: `https://wa.me/${phone}?text=${encodeURIComponent(message)}` });
-});
-router.post('/messages/:id/opened', requirePermission('messages:send'), async (req, res) => {
+}));
+router.post('/messages/:id/opened', requirePermission('messages:send'), asyncHandler(async (req, res) => {
   const existing = await MessageLog.findById(req.params.id); if (!existing) return res.status(404).json({ error: 'Message record not found.' });
   if (!await residentIsInScope(req, String(existing.residentId))) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
   const message = await MessageLog.findByIdAndUpdate(req.params.id, { $set: { status: 'OPENED_MANUALLY', openedAt: new Date() } }, { new: true });
   if (!message) return res.status(404).json({ error: 'Message record not found.' }); return res.json({ message });
-});
-router.get('/messages', requirePermission('messages:read'), async (req, res) => {
+}));
+router.get('/messages', requirePermission('messages:read'), asyncHandler(async (req, res) => {
   const filter: Record<string, unknown> = {};
   const requestedPropertyId = req.query.propertyId && /^[a-f\d]{24}$/i.test(String(req.query.propertyId)) ? String(req.query.propertyId) : undefined;
   const scope = await scopedResidentIds(req, requestedPropertyId);
   if (scope.forbidden) return res.status(403).json({ error: 'You do not have access to this property.' });
   if (scope.ids !== null) filter.residentId = { $in: scope.ids };
   const messages = await MessageLog.find(filter).populate('residentId', 'residentId fullName').populate('authorId', 'name').sort({ createdAt: -1 }).limit(200).lean(); return res.json({ messages });
-});
+}));
 
-router.get('/reports/:name', requirePermission('reports:read'), async (req, res) => {
+router.get('/reports/:name', requirePermission('reports:read'), asyncHandler(async (req, res) => {
   const name = z.enum(['residents', 'occupancy', 'rent', 'overdue', 'collections', 'outstanding', 'utilities', 'admissions']).parse(req.params.name);
   const propertyId = req.query.propertyId && /^[a-f\d]{24}$/i.test(String(req.query.propertyId)) ? String(req.query.propertyId) : '';
   if (propertyId && req.user?.role !== 'SUPER_ADMIN' && !(req.user?.propertyIds ?? []).includes(propertyId)) return res.status(403).json({ error: 'You do not have access to this property.' });
@@ -237,6 +238,6 @@ router.get('/reports/:name', requirePermission('reports:read'), async (req, res)
     res.type('text/csv'); res.setHeader('Content-Disposition', `attachment; filename="aashray-${name}.csv"`); return res.send([columns.map(cell).join(','), ...rows.map((row) => columns.map((key) => cell(row[key])).join(','))].join('\r\n'));
   }
   return res.json({ report: name, rows, from, to });
-});
+}));
 
 export default router;

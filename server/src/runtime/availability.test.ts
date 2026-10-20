@@ -1,0 +1,40 @@
+import express from 'express';
+import supertest from 'supertest';
+import { describe, expect, it, vi } from 'vitest';
+import { createAvailability } from './availability.js';
+
+describe('readiness and database availability', () => {
+  it('rejects startup/disconnected/draining traffic and recovers after reconnection without replaying requests', async () => {
+    let state = 0;
+    const availability = createAvailability(() => state);
+    const query = vi.fn((_req, res) => res.json({ saved: true }));
+    const app = express();
+    app.get('/health/live', (_req, res) => res.json({ status: 'ok' }));
+    app.get('/health/ready', availability.ready);
+    app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
+    app.use('/api', availability.guard);
+    app.post('/api/payment', query);
+    expect((await supertest(app).get('/health/ready')).status).toBe(503);
+    availability.markInitialized();
+    const failed = await supertest(app).post('/api/payment');
+    expect(failed.status).toBe(503);
+    expect(failed.headers['retry-after']).toBe('5');
+    expect(query).not.toHaveBeenCalled();
+    expect((await supertest(app).get('/health/live')).body).toEqual({ status: 'ok' });
+    expect((await supertest(app).get('/api/health')).body).toEqual({ status: 'ok' });
+    state = 1;
+    expect((await supertest(app).get('/health/ready')).status).toBe(200);
+    expect((await supertest(app).post('/api/payment')).status).toBe(200);
+    state = 0;
+    expect((await supertest(app).get('/health/ready')).status).toBe(503);
+    state = 1;
+    expect((await supertest(app).get('/health/ready')).status).toBe(200);
+    expect(query).toHaveBeenCalledOnce();
+    availability.beginShutdown();
+    expect((await supertest(app).get('/health/ready')).status).toBe(503);
+    const draining = await supertest(app).post('/api/payment');
+    expect(draining.status).toBe(503);
+    expect(draining.headers.connection).toBe('close');
+    expect(query).toHaveBeenCalledOnce();
+  });
+});

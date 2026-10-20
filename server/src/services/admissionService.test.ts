@@ -38,6 +38,7 @@ describe('resident admission transaction', () => {
     expect(result.duplicate).toBe(false);
     expect(residentCreate).toHaveBeenCalledOnce();
     expect(residentCreate.mock.calls[0]?.[0][0].gender).toBe('MALE');
+    expect(residentCreate.mock.calls[0]?.[0][0]).toMatchObject({ address: '', referenceName: '', referenceContact: '' });
     expect(allocationCreate).toHaveBeenCalledOnce();
     expect(chargeCreate).toHaveBeenCalledOnce();
     expect(chargeCreate.mock.calls[0]?.[0][0]).toMatchObject({ kind: 'RENT', periodKey: '2026-10', amountPaise: 850000, idempotencyKey: expect.stringContaining(':2026-10') });

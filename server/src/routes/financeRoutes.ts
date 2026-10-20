@@ -1,3 +1,4 @@
+import { asyncHandler } from '../middleware/asyncHandler.js';
 import { Router } from 'express';
 import { z } from 'zod';
 import { Types } from 'mongoose';
@@ -27,7 +28,7 @@ function rangeDate(value: unknown, upperBoundary = false) {
   return new Date(text);
 }
 
-router.get('/charges', requirePermission('billing:read'), async (req, res) => {
+router.get('/charges', requirePermission('billing:read'), asyncHandler(async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1); const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25));
   const filter: Record<string, unknown> = {};
   if (req.query.residentId && id.safeParse(req.query.residentId).success) filter.residentId = req.query.residentId;
@@ -78,9 +79,9 @@ router.get('/charges', requirePermission('billing:read'), async (req, res) => {
     }
   }
   return res.json({ charges: charges.map((c) => ({ ...c, ...(c.kind === 'RENT' ? rentChargeLedger(c) : chargeLedger(c)), paymentHistory: paymentsByCharge.get(String(c._id)) ?? [] })), page, limit, total, pages: Math.ceil(total / limit) });
-});
+}));
 
-router.post('/utilities', requirePermission('utilities:write'), async (req, res) => {
+router.post('/utilities', requirePermission('utilities:write'), asyncHandler(async (req, res) => {
   const data = z.object({ residentId: id, propertyId: id.optional(), utilityType: z.string().trim().min(2).max(60), amount: z.number().positive().max(10000000), issuedAt: day, dueAt: day, notes: z.string().max(1000).default(''), idempotencyKey: z.string().uuid() }).and(utilityPeriodSchema).parse(req.body);
   const servicePeriod = resolveUtilityPeriod(data);
   if (!await Resident.exists({ _id: data.residentId })) return res.status(404).json({ error: 'Resident not found.' });
@@ -104,9 +105,9 @@ router.post('/utilities', requirePermission('utilities:write'), async (req, res)
     });
     return res.status(201).json({ charge });
   } catch (error) { if ((error as { code?: number }).code === 11000) return res.status(200).json({ charge: await Charge.findOne({ idempotencyKey: utilityIdempotencyKey }) }); throw error; }
-});
+}));
 
-router.post('/deposits', requirePermission('payments:write'), async (req, res) => {
+router.post('/deposits', requirePermission('payments:write'), asyncHandler(async (req, res) => {
   const data = z.object({ residentId: id, amount: z.number().positive().max(10000000), kind: z.enum(['RECEIVED', 'REFUNDED']), paymentMethod: z.enum(['CASH', 'BANK_TRANSFER', 'UPI', 'OTHER']), reference: z.string().max(120).default(''), reason: z.string().trim().min(5).max(1000), idempotencyKey: z.string().uuid() }).parse(req.body);
   if (!await residentIsInScope(req, data.residentId)) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
   const amountPaise = paiseFromRupees(data.amount);
@@ -123,25 +124,25 @@ router.post('/deposits', requirePermission('payments:write'), async (req, res) =
     return { transaction, balancePaise: newBalancePaise };
   });
   return res.status(201).json(result);
-});
+}));
 
-router.post('/billing/preview', requirePermission('billing:write'), async (req, res) => {
+router.post('/billing/preview', requirePermission('billing:write'), asyncHandler(async (req, res) => {
   const { periodKey, propertyId } = z.object({ periodKey: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/), propertyId: id.optional() }).parse(req.body);
   if (propertyId && req.user?.role !== 'SUPER_ADMIN' && !(req.user?.propertyIds ?? []).includes(propertyId)) return res.status(403).json({ error: 'You do not have access to this property.' });
   if (propertyId && !await Property.exists({ _id: propertyId, active: true })) return res.status(404).json({ error: 'Active property not found.' });
   const assigned = req.user?.role === 'SUPER_ADMIN' ? undefined : req.user?.propertyIds ?? [];
   return res.json({ periodKey, propertyId: propertyId ?? null, ...(await previewMonthlyBilling(periodKey, propertyId, assigned)) });
-});
+}));
 
-router.post('/billing/generate', requirePermission('billing:write'), async (req, res) => {
+router.post('/billing/generate', requirePermission('billing:write'), asyncHandler(async (req, res) => {
   const { periodKey, propertyId } = z.object({ periodKey: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/), propertyId: id.optional(), confirmed: z.literal(true) }).parse(req.body);
   if (propertyId && req.user?.role !== 'SUPER_ADMIN' && !(req.user?.propertyIds ?? []).includes(propertyId)) return res.status(403).json({ error: 'You do not have access to this property.' });
   if (propertyId && !await Property.exists({ _id: propertyId, active: true })) return res.status(404).json({ error: 'Active property not found.' });
   const assigned = req.user?.role === 'SUPER_ADMIN' ? undefined : req.user?.propertyIds ?? [];
   return res.json(await generateMonthlyBilling(periodKey, req.user!.id, propertyId, assigned));
-});
+}));
 
-router.patch('/charges/:id/adjust', requirePermission('billing:write'), async (req, res) => {
+router.patch('/charges/:id/adjust', requirePermission('billing:write'), asyncHandler(async (req, res) => {
   const data = z.object({ amount: z.number().positive().max(10000000), reason: z.string().trim().min(5).max(1000) }).parse(req.body);
   const after = paiseFromRupees(data.amount);
   const charge = await inTransaction(async (session) => {
@@ -155,9 +156,9 @@ router.patch('/charges/:id/adjust', requirePermission('billing:write'), async (r
     return doc;
   });
   return res.json({ charge });
-});
+}));
 
-router.get('/payments', requirePermission('payments:read'), async (req, res) => {
+router.get('/payments', requirePermission('payments:read'), asyncHandler(async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1); const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25));
   const filter: Record<string, unknown> = {};
   if (req.query.residentId && id.safeParse(req.query.residentId).success) filter.residentId = req.query.residentId;
@@ -169,9 +170,9 @@ router.get('/payments', requirePermission('payments:read'), async (req, res) => 
   if (req.query.from || req.query.to) filter.paymentDate = { ...(req.query.from ? { $gte: rangeDate(req.query.from) } : {}), ...(req.query.to ? { $lte: rangeDate(req.query.to, true) } : {}) };
   const [payments, total] = await Promise.all([Payment.find(filter).populate('residentId', 'residentId fullName mobile').sort({ paymentDate: -1 }).skip((page - 1) * limit).limit(limit).lean(), Payment.countDocuments(filter)]);
   return res.json({ payments: payments.map((payment) => { const allocatedPaise = payment.reversedAt ? 0 : payment.allocations.reduce((sum, allocation) => sum + allocation.amountPaise, 0); const unallocatedPaise = payment.reversedAt ? 0 : payment.amountPaise - allocatedPaise; return { ...payment, allocatedPaise, unallocatedPaise, allocationStatus: payment.reversedAt ? 'REVERSED' : unallocatedPaise ? allocatedPaise ? 'PARTIALLY_ALLOCATED' : 'UNALLOCATED' : 'ALLOCATED' }; }), page, limit, total, pages: Math.ceil(total / limit) });
-});
+}));
 
-router.post('/payments', requirePermission('payments:write'), async (req, res) => {
+router.post('/payments', requirePermission('payments:write'), asyncHandler(async (req, res) => {
   const data = z.object({ residentId: id, propertyId: id.optional(), amount: z.number().positive().max(10000000), paymentDate: day, method: z.enum(['CASH', 'BANK_TRANSFER', 'UPI', 'OTHER']), reference: z.string().max(120).default(''), notes: z.string().max(1000).default(''), allocations: z.array(z.object({ chargeId: id, amount: z.number().positive() })).max(50).default([]).refine((values) => new Set(values.map((v) => v.chargeId)).size === values.length, 'A charge can only appear once per payment.'), idempotencyKey: z.string().uuid() }).parse(req.body);
   if (!await residentIsInScope(req, data.residentId)) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
   if (data.propertyId && req.user?.role !== 'SUPER_ADMIN' && !(req.user?.propertyIds ?? []).includes(data.propertyId)) return res.status(403).json({ error: 'You do not have access to this property.' });
@@ -199,9 +200,9 @@ router.post('/payments', requirePermission('payments:write'), async (req, res) =
     throw error;
   });
   return res.status(201).json({ payment });
-});
+}));
 
-router.post('/payments/:id/allocate', requirePermission('payments:write'), async (req, res) => {
+router.post('/payments/:id/allocate', requirePermission('payments:write'), asyncHandler(async (req, res) => {
   const data = z.object({ allocations: z.array(z.object({ chargeId: id, amount: z.number().positive() })).min(1).max(50).refine((values) => new Set(values.map((v) => v.chargeId)).size === values.length, 'A charge can only appear once per allocation request.') }).parse(req.body);
   const additions = data.allocations.map((entry) => ({ chargeId: new Types.ObjectId(entry.chargeId), amountPaise: paiseFromRupees(entry.amount) }));
   const payment = await inTransaction(async (session) => {
@@ -227,9 +228,9 @@ router.post('/payments/:id/allocate', requirePermission('payments:write'), async
   });
   const allocatedPaise = payment.allocations.reduce((sum, entry) => sum + entry.amountPaise, 0);
   return res.json({ payment, allocatedPaise, unallocatedPaise: payment.amountPaise - allocatedPaise });
-});
+}));
 
-router.get('/payments/:id/receipt', requirePermission('payments:read'), async (req, res) => {
+router.get('/payments/:id/receipt', requirePermission('payments:read'), asyncHandler(async (req, res) => {
   const payment = await Payment.findById(req.params.id).populate('residentId', 'residentId fullName mobile securityDepositPaise rentSchedules').lean();
   if (!payment) return res.status(404).json({ error: 'Payment not found.' });
   if (!await residentIsInScope(req, String((payment.residentId as unknown as { _id: Types.ObjectId })._id))) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
@@ -240,9 +241,9 @@ router.get('/payments/:id/receipt', requirePermission('payments:read'), async (r
   const chargeMap = new Map(charges.map((charge) => [String(charge._id), charge]));
   const receiptNumber = `ASH-${payment.paymentDate.getUTCFullYear()}-${String(payment._id).toUpperCase()}`;
   return res.json({ payment, receiptNumber, allocation, breakdown: payment.allocations.map((item) => ({ ...item, charge: chargeMap.get(String(item.chargeId)) ?? null })) });
-});
+}));
 
-router.post('/payments/:id/reverse', requirePermission('payments:write'), async (req, res) => {
+router.post('/payments/:id/reverse', requirePermission('payments:write'), asyncHandler(async (req, res) => {
   const { reason } = z.object({ reason: z.string().trim().min(5).max(1000) }).parse(req.body);
   const payment = await inTransaction(async (session) => {
     const doc = await Payment.findById(req.params.id).session(session); if (!doc) throw Object.assign(new Error('Payment not found.'), { status: 404 });
@@ -258,6 +259,6 @@ router.post('/payments/:id/reverse', requirePermission('payments:write'), async 
     return doc;
   });
   return res.json({ payment });
-});
+}));
 
 export default router;

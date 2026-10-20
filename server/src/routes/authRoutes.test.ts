@@ -1,5 +1,13 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import supertest, { type Agent } from 'supertest';
+import type { RequestHandler } from 'express';
+
+vi.mock('../runtime/availability.js', () => ({
+  availability: {
+    guard: ((_req, _res, next) => next()) as RequestHandler,
+    ready: ((_req, res) => res.json({ status: 'ok' })) as RequestHandler,
+  },
+}));
 
 vi.mock('../services/authService.js', () => ({ authenticate: vi.fn(), revokeSession: vi.fn(), hashToken: vi.fn((token: string) => token) }));
 vi.mock('../models/Session.js', () => ({ Session: { findOne: vi.fn() } }));
@@ -52,6 +60,29 @@ describe('authentication REST endpoints', () => {
   it('rejects protected session reads without a valid session', async () => {
     const response = await supertest((await import('../app.js')).app).get('/api/auth/me');
     expect(response.status).toBe(401);
+  });
+
+  it('forwards invalid login input without terminating the API', async () => {
+    const response = await client.post('/api/auth/login').send({ email: 'invalid', password: '' });
+    expect(response.status).toBe(400);
+    expect(response.body.fields.email).toBeDefined();
+    expect((await client.get('/api/health')).body).toEqual({ status: 'ok' });
+  });
+
+  it('forwards an authentication database rejection and returns a request ID', async () => {
+    vi.mocked(authenticate).mockRejectedValueOnce(Object.assign(new Error('private connection details'), { name: 'MongoNetworkError' }));
+    const response = await client.post('/api/auth/login').send({ email: 'owner@example.com', password: 'test-password' });
+    expect(response.status).toBe(503);
+    expect(response.headers['x-request-id']).toBeDefined();
+    expect(response.body.error).not.toContain('private');
+    expect((await client.get('/api/health')).status).toBe(200);
+  });
+
+  it('forwards database failures from authentication middleware', async () => {
+    sessionFindOne.mockRejectedValueOnce(Object.assign(new Error('query failed'), { name: 'MongoServerError', code: 2 }));
+    const response = await client.get('/api/auth/me').set('Cookie', 'aashray_session=test');
+    expect(response.status).toBe(500);
+    expect(response.body).toEqual({ error: 'An unexpected error occurred.' });
   });
 
   it('validates a CSRF token, revokes the session, and clears cookies on logout', async () => {
