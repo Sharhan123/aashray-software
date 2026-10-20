@@ -5,6 +5,7 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import { ArrowRight, Eye, EyeOff, KeyRound, LockKeyhole, Mail, ShieldCheck, Sparkles } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { AashrayLogo } from '../components/BrandMark';
+import { ThemeToggle } from '../components/ui';
 import { useAuth } from '../state/useAuth';
 
 const schema = z.object({ email: z.string().trim().email('Enter a valid email address.').max(254), password: z.string().min(1, 'Enter your password.').max(200) });
@@ -22,6 +23,7 @@ export function LoginPage() {
 
   return <main className="login-page">
     <section className="login-form-side" aria-labelledby="welcome-title">
+      <ThemeToggle className="login-theme-toggle" />
       <div className="mobile-brand"><AashrayLogo className="login-brand-logo" /></div>
       <div className="login-content">
         <div className="login-kicker"><span className="kicker-line" /> SECURE TEAM ACCESS</div>
