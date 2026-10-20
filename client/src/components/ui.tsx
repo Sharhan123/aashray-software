@@ -16,6 +16,9 @@ export function ThemeToggle({ className = '' }: { className?: string }) {
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     document.documentElement.style.colorScheme = theme;
+      // Workspace theme rules are scoped to the app shell, while the pre-paint
+      // theme bootstrap and browser color scheme live on the document root.
+      document.querySelector<HTMLElement>('.app-shell')?.setAttribute('data-theme', theme);
     try { window.localStorage.setItem('aashray-theme', theme); } catch { /* Theme still applies for this session. */ }
   }, [theme]);
   return <button type="button" className={`theme-toggle ${className}`.trim()} onClick={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')} aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`} title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}><span className="theme-toggle-icon">{theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}</span><span className="theme-toggle-label">{theme === 'dark' ? 'Light' : 'Dark'}</span></button>;
