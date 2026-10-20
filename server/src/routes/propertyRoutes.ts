@@ -210,7 +210,7 @@ router.get('/residents/:id', requirePermission('residents:read'), asyncHandler(a
   if (!resident) return res.status(404).json({ error: 'Resident not found.' });
   if (!await residentIsInScope(req, String(resident._id))) return res.status(403).json({ error: 'You do not have access to this residentâ€™s property.' });
   const [allocations, charges, payments, deposits, messages, audit, migration, checkouts, transfers] = await Promise.all([
-    RoomAllocation.find({ residentId: resident._id }).populate('roomId', 'roomNumber roomType').sort({ startDate: -1 }).lean(),
+    RoomAllocation.find({ residentId: resident._id }).populate({ path: 'roomId', select: 'roomNumber roomType propertyId propertyName', populate: { path: 'propertyId', select: 'name' } }).sort({ startDate: -1 }).lean(),
     Charge.find({ residentId: resident._id }).sort({ dueAt: -1 }).lean(),
     Payment.find({ residentId: resident._id }).sort({ paymentDate: -1 }).lean(),
     DepositTransaction.find({ residentId: resident._id }).sort({ createdAt: -1 }).lean(),

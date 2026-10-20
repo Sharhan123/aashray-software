@@ -11,6 +11,7 @@ import { Property } from '../models/Property.js';
 import { Resident } from '../models/Resident.js';
 import { Charge } from '../models/Charge.js';
 import { Payment } from '../models/Payment.js';
+import { DepositTransaction } from '../models/DepositTransaction.js';
 import { ResidentMigration } from '../models/ResidentMigration.js';
 import { MessageLog } from '../models/MessageLog.js';
 import { AppSettings } from '../models/AppSettings.js';
@@ -34,7 +35,7 @@ router.get('/dashboard', requirePermission('dashboard:read'), asyncHandler(async
   const roomMatch = roomScope.ids === null ? {} : { _id: { $in: roomScope.ids } };
   const rentBalanceExpr = { $max: [0, { $subtract: ['$amountPaise', { $add: ['$paidPaise', { $ifNull: ['$externalPaidPaise', 0] }] }] }] };
   const rentOverdueFilter = { kind: 'RENT', ...rentChargeMongoFilter('OVERDUE', now) };
-  const [activeResidents, totalBeds, occupiedBeds, rentBilled, rentCollected, externalRentCollected, balances, rentOutstanding, openingOutstanding, overdueBalances, overdueResidentIds, utilityPending, upcomingDues, recentPayments, recentAdmissions] = await Promise.all([
+  const [activeResidents, totalBeds, occupiedBeds, rentBilled, rentCollected, externalRentCollected, balances, rentOutstanding, openingOutstanding, overdueBalances, overdueResidentIds, utilityPending, securityDepositsHeld, upcomingDues, recentPayments, recentAdmissions] = await Promise.all([
     Resident.countDocuments({ ...residentFilter, status: 'ACTIVE' }), Room.aggregate([{ $match: { active: true, ...roomMatch } }, { $group: { _id: null, total: { $sum: '$capacity' } } }]), RoomAllocation.countDocuments({ active: true, ...(roomScope.ids === null ? {} : { roomId: { $in: roomScope.ids } }) }),
     Charge.aggregate([{ $match: { kind: 'RENT', periodKey: currentPeriod, ...chargeResidentFilter } }, { $group: { _id: null, total: { $sum: '$amountPaise' } } }]),
     Payment.aggregate([{ $match: { paymentDate: { $gte: monthStart, $lt: monthEnd }, reversedAt: null, ...paymentResidentFilter } }, { $unwind: '$allocations' }, { $lookup: { from: 'charges', localField: 'allocations.chargeId', foreignField: '_id', as: 'charge' } }, { $unwind: '$charge' }, { $match: { 'charge.kind': 'RENT' } }, { $group: { _id: null, total: { $sum: '$allocations.amountPaise' } } }]),
@@ -45,8 +46,13 @@ router.get('/dashboard', requirePermission('dashboard:read'), asyncHandler(async
     Charge.aggregate([{ $match: { ...rentOverdueFilter, ...chargeResidentFilter } }, { $group: { _id: null, total: { $sum: rentBalanceExpr } } }]),
     Charge.distinct('residentId', { ...rentOverdueFilter, ...chargeResidentFilter }),
     Charge.aggregate([{ $match: { kind: 'UTILITY', ...chargeResidentFilter, $expr: { $lt: [{ $add: ['$paidPaise', { $ifNull: ['$externalPaidPaise', 0] }] }, '$amountPaise'] } } }, { $group: { _id: null, total: { $sum: { $max: [0, { $subtract: ['$amountPaise', { $add: ['$paidPaise', { $ifNull: ['$externalPaidPaise', 0] }] }] }] } } } }]),
+    DepositTransaction.aggregate([
+      { $match: chargeResidentFilter },
+      { $group: { _id: '$residentId', balancePaise: { $sum: { $switch: { branches: [{ case: { $eq: ['$kind', 'RECEIVED'] }, then: '$amountPaise' }, { case: { $in: ['$kind', ['REFUNDED', 'APPLIED']] }, then: { $multiply: ['$amountPaise', -1] } }], default: 0 } } } } },
+      { $group: { _id: null, total: { $sum: { $max: [0, '$balancePaise'] } } } },
+    ]),
     Charge.find({ kind: 'RENT', ...rentChargeMongoFilter('UPCOMING', now), periodKey: currentPeriod, ...chargeResidentFilter }).populate('residentId', 'residentId fullName').sort({ dueAt: 1 }).limit(8).lean(),
-    Payment.find({ reversedAt: null, ...paymentResidentFilter }).populate('residentId', 'residentId fullName').sort({ paymentDate: -1 }).limit(8).lean(), Resident.find(residentFilter).sort({ admissionDate: -1 }).limit(8).select('residentId fullName admissionDate').lean(),
+    Payment.find({ reversedAt: null, ...paymentResidentFilter }).populate('residentId', 'residentId fullName').sort({ createdAt: -1, _id: -1 }).limit(8).lean(), Resident.find(residentFilter).sort({ admissionDate: -1 }).limit(8).select('residentId fullName admissionDate').lean(),
   ]);
   const [properties, activeRooms, activeGenderCounts] = await Promise.all([
     Property.find(req.user!.role === 'SUPER_ADMIN' ? {} : { _id: { $in: req.user!.propertyIds ?? [] } }).select('_id gender').lean(),
@@ -96,7 +102,7 @@ router.get('/dashboard', requirePermission('dashboard:read'), asyncHandler(async
     const room = allocation?.roomId as unknown as { roomNumber?: string; propertyName?: string } | null;
     return { residentId: String(resident._id), residentCode: resident.residentId, fullName: resident.fullName, outstandingRentPaise: rentSummary.balancePaise, dueAt: rentSummary.dueAt, daysPastDue: rentSummary.daysPastDue, roomNumber: room?.roomNumber ?? '', bedId: allocation?.bedId ?? '', propertyName: room?.propertyName ?? '' };
   });
-  return res.json({ period: { start: monthStart, end: monthEnd, periodKey: currentPeriod }, metrics: { activeResidents, totalBeds: totalBeds[0]?.total ?? 0, occupiedBeds, availableBeds: Math.max(0, (totalBeds[0]?.total ?? 0) - occupiedBeds), genderBreakdown, rentBilledPaise: rentBilled[0]?.total ?? 0, rentCollectedPaise: (rentCollected[0]?.total ?? 0) + (externalRentCollected[0]?.total ?? 0), outstandingRentPaise: legacyRent, totalOutstandingRentPaise: rentOutstanding[0]?.total ?? 0, openingBalanceOutstandingPaise: openingOutstanding[0]?.total ?? 0, overdueRentPaise: overdueBalances[0]?.total ?? 0, overdueRentResidentCount: overdueResidentIds.length, pendingUtilityPaise: utilityPending[0]?.total ?? 0 }, overdueFollowUps, upcomingDues, recentPayments, recentAdmissions });
+  return res.json({ period: { start: monthStart, end: monthEnd, periodKey: currentPeriod }, metrics: { activeResidents, totalBeds: totalBeds[0]?.total ?? 0, occupiedBeds, availableBeds: Math.max(0, (totalBeds[0]?.total ?? 0) - occupiedBeds), genderBreakdown, rentBilledPaise: rentBilled[0]?.total ?? 0, rentCollectedPaise: (rentCollected[0]?.total ?? 0) + (externalRentCollected[0]?.total ?? 0), outstandingRentPaise: legacyRent, totalOutstandingRentPaise: rentOutstanding[0]?.total ?? 0, openingBalanceOutstandingPaise: openingOutstanding[0]?.total ?? 0, overdueRentPaise: overdueBalances[0]?.total ?? 0, overdueRentResidentCount: overdueResidentIds.length, pendingUtilityPaise: utilityPending[0]?.total ?? 0, securityDepositsHeldPaise: securityDepositsHeld[0]?.total ?? 0 }, overdueFollowUps, upcomingDues, recentPayments, recentAdmissions });
 }));
 
 router.get('/staff', requirePermission('staff:read'), asyncHandler(async (_req, res) => {
