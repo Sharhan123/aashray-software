@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { ArrowDownToLine, BedDouble, Building2, CircleDollarSign, FileText, LayoutGrid, List, Plus, Printer, Search, Send, Users, WalletCards, X } from 'lucide-react';
+import { ArrowDownToLine, BedDouble, Building2, CircleDollarSign, Eye, EyeOff, FileText, LayoutGrid, List, Plus, Printer, Search, Send, Users, WalletCards, X } from 'lucide-react';
 import { api } from '../lib/api';
 import { PageHeading, EmptyState, Button } from '../components/ui';
 import { useFeedback } from '../components/feedbackContext';
@@ -450,6 +450,8 @@ export function DashboardLivePage() {
   const metrics = data?.metrics;
   const [vacancyOpen, setVacancyOpen] = useState(false);
   const [selectedPropertyId, setSelectedPropertyId] = useState('');
+  const [amountsHidden, setAmountsHidden] = useState(false);
+  const dashboardMoney = (paise = 0) => amountsHidden ? '••••••' : money(paise);
   useEffect(() => {
     if (!vacancyOpen) return;
     const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setVacancyOpen(false); };
@@ -463,28 +465,28 @@ export function DashboardLivePage() {
   const genderBreakdown = metrics?.genderBreakdown as Json | undefined;
 
   return <div className="dashboard-page">
-    <PageHeading eyebrow="LIVE OPERATIONS" title="Dashboard" description={data?.period ? `Current month · ${dateText(data.period.start)} – ${dateText(data.period.end)}` : 'Live property and finance metrics.'} action={<AashrayLogo className="dashboard-brand-logo" />} />
+    <PageHeading eyebrow="LIVE OPERATIONS" title="Dashboard" description={data?.period ? `Current month · ${dateText(data.period.start)} – ${dateText(data.period.end)}` : 'Live property and finance metrics.'} action={<div className="business-actions dashboard-heading-actions" style={{ alignItems: 'center', flexWrap: 'wrap' }}><button type="button" className="business-secondary" onClick={() => setAmountsHidden((hidden) => !hidden)} aria-pressed={amountsHidden} aria-label={amountsHidden ? 'Show dashboard amounts' : 'Hide dashboard amounts'}>{amountsHidden ? <Eye size={16}/> : <EyeOff size={16}/>} {amountsHidden ? 'Show amounts' : 'Hide amounts'}</button><AashrayLogo className="dashboard-brand-logo" /></div>} />
     {error && <Notice tone="error">{error}</Notice>}
     {metrics && <div className="business-metrics dashboard-priority-metrics">
       <Link className="dashboard-metric dashboard-metric-link" to="/residents"><Users size={18}/><span>Active residents / occupied beds</span><b>{metrics.activeResidents}</b></Link>
       <button type="button" className="dashboard-metric dashboard-metric-link dashboard-vacancy-trigger" onClick={() => setVacancyOpen(true)} aria-haspopup="dialog"><BedDouble size={18}/><span>Total beds / vacant beds</span><b>{metrics.totalBeds} / {metrics.availableBeds}</b><small>View vacancies by property and room</small></button>
-      <article><CircleDollarSign size={18}/><span>Unpaid rent balance · all periods</span><b>{money(metrics.totalOutstandingRentPaise ?? metrics.outstandingRentPaise)}</b></article>
-      <Link className="dashboard-metric dashboard-metric-link" to="/residents?rentStatus=OVERDUE&rentPeriod=all"><CircleDollarSign size={18}/><span>Overdue rent · {metrics.overdueRentResidentCount ?? 0} residents</span><b>{money(metrics.overdueRentPaise)}</b></Link>
-      <article><CircleDollarSign size={18}/><span>Rent billed this month</span><b>{money(metrics.rentBilledPaise)}</b></article>
-      <article><WalletCards size={18}/><span>Collected this month</span><b>{money(metrics.rentCollectedPaise)}</b></article>
+      <article><CircleDollarSign size={18}/><span>Unpaid rent balance · all periods</span><b>{dashboardMoney(metrics.totalOutstandingRentPaise ?? metrics.outstandingRentPaise)}</b></article>
+      <Link className="dashboard-metric dashboard-metric-link" to="/residents?rentStatus=OVERDUE&rentPeriod=all"><CircleDollarSign size={18}/><span>Overdue rent · {metrics.overdueRentResidentCount ?? 0} residents</span><b>{dashboardMoney(metrics.overdueRentPaise)}</b></Link>
+      <article><CircleDollarSign size={18}/><span>Rent billed this month</span><b>{dashboardMoney(metrics.rentBilledPaise)}</b></article>
+      <article><WalletCards size={18}/><span>Collected this month</span><b>{dashboardMoney(metrics.rentCollectedPaise)}</b></article>
     </div>}
     {genderBreakdown && <section className="dashboard-gender-summary"><div><h2>Residents and vacancies by gender</h2><p>Bed availability follows each property’s assigned gender.</p></div><div className="dashboard-gender-cards">{(['MALE', 'FEMALE'] as const).map((gender) => { const summary = genderBreakdown[gender] as Json; const occupied = Number(summary?.occupiedBeds ?? 0); const total = Number(summary?.totalBeds ?? 0); const occupancy = total > 0 ? Math.min(100, Math.round(occupied / total * 100)) : 0; const property = activeProperties.find((item) => item.gender === gender); return <button type="button" className={`dashboard-gender-card ${gender.toLowerCase()}`} key={gender} onClick={() => { setSelectedPropertyId(String(property?._id ?? '')); setVacancyOpen(true); }}><span>{gender === 'MALE' ? 'Male' : 'Female'}</span><b>{summary?.activeResidents ?? 0} residents</b><small>{occupied} / {total} beds occupied · {summary?.vacantBeds ?? 0} vacant</small><span className="dashboard-occupancy-track" aria-label={`${occupancy}% of beds occupied`}><i style={{ width: `${occupancy}%` }} /></span></button>; })}</div>{Number((genderBreakdown.UNASSIGNED as Json | undefined)?.activeResidents ?? 0) > 0 || Number((genderBreakdown.UNASSIGNED as Json | undefined)?.totalBeds ?? 0) > 0 ? <Notice tone="error">Unassigned legacy records: {(genderBreakdown.UNASSIGNED as Json).activeResidents ?? 0} residents · {(genderBreakdown.UNASSIGNED as Json).vacantBeds ?? 0} vacant beds. Assign these properties/residents a gender to include them above.</Notice> : null}</section>}
     <div className="business-detail-grid dashboard-followup-grid">
       <section className="business-panel">
         <div className="property-residents-heading"><div><h2>Follow up</h2><p>Residents with rent past the five-day grace period.</p></div><Link className="business-link" to="/residents?rentStatus=OVERDUE&rentPeriod=all">View all</Link></div>
-        <DataState error={error} loading={!data}><Table columns={['Resident','Property','Due date','Days late','Outstanding','']} empty="No overdue rent follow-ups." rows={(data?.overdueFollowUps ?? []).map((resident: Json) => [<Link key={resident.residentId} to={`/residents/${resident.residentId}`}>{resident.fullName}</Link>, resident.propertyName || '—', dateText(resident.dueAt), resident.daysPastDue, money(resident.outstandingRentPaise), <div className="business-actions"><Link className="business-link" to={`/payments?residentId=${resident.residentId}`}>Record payment</Link><Link className="business-link" to={`/messages?residentId=${resident.residentId}&messageType=OVERDUE`}>Remind</Link></div>])} /></DataState>
+        <DataState error={error} loading={!data}><Table columns={['Resident','Property','Due date','Days late','Outstanding','']} empty="No overdue rent follow-ups." rows={(data?.overdueFollowUps ?? []).map((resident: Json) => [<Link key={resident.residentId} to={`/residents/${resident.residentId}`}>{resident.fullName}</Link>, resident.propertyName || '—', dateText(resident.dueAt), resident.daysPastDue, dashboardMoney(resident.outstandingRentPaise), <div className="business-actions"><Link className="business-link" to={`/payments?residentId=${resident.residentId}`}>Record payment</Link><Link className="business-link" to={`/messages?residentId=${resident.residentId}&messageType=OVERDUE`}>Remind</Link></div>])} /></DataState>
       </section>
       <section className="business-panel dashboard-property-shortcuts">
         <div className="property-residents-heading"><div><h2>Properties</h2><p>Quick access to property operations.</p></div><Link className="business-link" to="/">All properties</Link></div>
         <DataState error={properties.error} loading={!properties.data}><div className="dashboard-property-list">{activeProperties.slice(0, 6).map((property) => <Link key={property._id} to={`/properties/${property._id}`}><Building2 size={17}/><span>{property.name}</span><small>{property.occupiedBeds}/{property.totalBeds} beds</small></Link>)}</div></DataState>
       </section>
     </div>
-    <section className="business-panel dashboard-recent-payments"><h2>Recent payments</h2><DataState error={error} loading={!data}><Table columns={['Resident','Date','Amount','Method']} empty="No payments recorded yet." rows={(data?.recentPayments ?? []).slice(0, 5).map((payment: Json) => [payment.residentId?.fullName ?? '—', dateText(payment.paymentDate), money(payment.amountPaise), payment.method])}/></DataState></section>
+    <section className="business-panel dashboard-recent-payments"><h2>Recent payments</h2><DataState error={error} loading={!data}><Table columns={['Resident','Date','Amount','Method']} empty="No payments recorded yet." rows={(data?.recentPayments ?? []).slice(0, 5).map((payment: Json) => [payment.residentId?.fullName ?? '—', dateText(payment.paymentDate), dashboardMoney(payment.amountPaise), payment.method])}/></DataState></section>
     {vacancyOpen && <div className="dashboard-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setVacancyOpen(false); }}>
       <section className="dashboard-vacancy-modal" role="dialog" aria-modal="true" aria-labelledby="dashboard-vacancy-title">
         <header className="dashboard-vacancy-modal-header"><div><span>PROPERTY INVENTORY</span><h2 id="dashboard-vacancy-title">Bed availability</h2><p>Choose a property to see vacant beds by room.</p></div><button type="button" className="dashboard-modal-close" aria-label="Close vacant bed details" onClick={() => setVacancyOpen(false)}><X size={19}/></button></header>
