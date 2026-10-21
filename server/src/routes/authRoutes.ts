@@ -1,5 +1,6 @@
 import { Router } from 'express';
-import rateLimit from 'express-rate-limit';
+import * as rateLimitModule from 'express-rate-limit';
+import type { Options, RateLimitRequestHandler } from 'express-rate-limit';
 import { csrf, login, logout, me, refresh } from '../controllers/authController.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireCsrf } from '../middleware/csrf.js';
@@ -7,6 +8,7 @@ import { asyncHandler } from '../middleware/asyncHandler.js';
 import { MongoRateLimitStore } from '../services/mongoRateLimitStore.js';
 
 const router = Router();
+const rateLimit = rateLimitModule.default as unknown as (options: Partial<Options>) => RateLimitRequestHandler;
 const loginLimit = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 10,
