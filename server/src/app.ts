@@ -1,5 +1,5 @@
 import express from 'express';
-import helmet from 'helmet';
+import * as helmet from 'helmet';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import { env, isProduction } from './config/env.js';
@@ -19,7 +19,7 @@ export const app = express();
 if (isProduction) app.set('trust proxy', 1);
 app.disable('x-powered-by');
 app.use(requestLogging());
-app.use(helmet());
+app.use(helmet.default());
 app.use(cors({ origin: env.CLIENT_ORIGIN, credentials: true, methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'], allowedHeaders: ['Content-Type', 'X-CSRF-Token'], exposedHeaders: ['X-Request-ID'] }));
 if (process.env.VERCEL === '1') {
   app.use(['/api', '/health/ready'], (_req, _res, next) => {
