@@ -12,6 +12,7 @@ import dataDeletionRoutes from './routes/dataDeletionRoutes.js';
 import { requireCsrf } from './middleware/csrf.js';
 import { errorHandler, notFound } from './middleware/errors.js';
 import { availability } from './runtime/availability.js';
+import { ensureServerlessDatabase } from './runtime/serverlessDatabase.js';
 import { requestLogging } from './middleware/requestLogging.js';
 
 export const app = express();
@@ -20,6 +21,11 @@ app.disable('x-powered-by');
 app.use(requestLogging());
 app.use(helmet());
 app.use(cors({ origin: env.CLIENT_ORIGIN, credentials: true, methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'], allowedHeaders: ['Content-Type', 'X-CSRF-Token'], exposedHeaders: ['X-Request-ID'] }));
+if (process.env.VERCEL === '1') {
+  app.use(['/api', '/health/ready'], (_req, _res, next) => {
+    void ensureServerlessDatabase().then(() => next(), next);
+  });
+}
 app.use(express.json({ limit: '2mb' }));
 app.use(cookieParser());
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
@@ -34,3 +40,5 @@ app.use('/api', requireCsrf, financeRoutes);
 app.use('/api', requireCsrf, workspaceRoutes);
 app.use(notFound);
 app.use(errorHandler);
+
+export default app;

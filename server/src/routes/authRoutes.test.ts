@@ -9,7 +9,7 @@ vi.mock('../runtime/availability.js', () => ({
   },
 }));
 
-vi.mock('../services/authService.js', () => ({ authenticate: vi.fn(), revokeSession: vi.fn(), hashToken: vi.fn((token: string) => token) }));
+vi.mock('../services/authService.js', () => ({ authenticate: vi.fn(), revokeSession: vi.fn(), rotateSession: vi.fn(), hashToken: vi.fn((token: string) => token), REFRESH_TOKEN_TTL_MS: 30 * 24 * 60 * 60 * 1000 }));
 vi.mock('../models/Session.js', () => ({ Session: { findOne: vi.fn() } }));
 vi.mock('../models/User.js', () => ({ User: { findOne: vi.fn(), findById: vi.fn() }, STAFF_PERMISSIONS: ['dashboard:read', 'residents:read', 'residents:write', 'rooms:read', 'rooms:write', 'billing:read', 'billing:write', 'payments:read', 'payments:write', 'utilities:read', 'utilities:write', 'messages:read', 'messages:send', 'reports:read', 'staff:read', 'staff:write', 'settings:read', 'settings:write'] }));
 
@@ -96,6 +96,6 @@ describe('authentication REST endpoints', () => {
     const csrf = await client.get('/api/auth/csrf');
     const response = await client.post('/api/auth/logout').set('X-CSRF-Token', csrf.body.csrfToken);
     expect(response.status).toBe(204);
-    expect(revokeSession).toHaveBeenCalledWith('opaque-session-token');
+    expect(revokeSession).toHaveBeenCalledWith('opaque-session-token', 'opaque-refresh-token');
   });
 });
