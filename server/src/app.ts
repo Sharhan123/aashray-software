@@ -38,6 +38,7 @@ app.use('/api', requireCsrf, propertyRoutes);
 app.use('/api', requireCsrf, propertyManagementRoutes);
 app.use('/api', requireCsrf, dataDeletionRoutes);
 app.use('/api', requireCsrf, financeRoutes);
+app.use('/api', requireCsrf, workspaceRoutes);
 app.use(notFound);
 app.use(errorHandler);
 
