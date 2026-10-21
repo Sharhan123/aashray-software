@@ -16,7 +16,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     const token = req.cookies?.aashray_session as string | undefined;
     if (!token) return res.status(401).json({ error: 'Authentication required.' });
     const session = await Session.findOne({ tokenHash: hashToken(token), expiresAt: { $gt: new Date() } });
-    if (!session) return res.status(401).json({ error: 'Authentication required.' });
+    if (!session || (session.accessExpiresAt && session.accessExpiresAt <= new Date())) return res.status(401).json({ error: 'Authentication required.' });
     const user = await User.findOne({ _id: session.userId, active: true });
     if (!user) return res.status(401).json({ error: 'Authentication required.' });
     req.user = { id: user.id, name: user.name, email: user.email, role: user.role, permissions: user.permissions as Permission[], propertyIds: (user.propertyIds ?? []).map(String) };

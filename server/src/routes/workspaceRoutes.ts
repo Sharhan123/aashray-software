@@ -35,7 +35,7 @@ router.get('/dashboard', requirePermission('dashboard:read'), asyncHandler(async
   const roomMatch = roomScope.ids === null ? {} : { _id: { $in: roomScope.ids } };
   const rentBalanceExpr = { $max: [0, { $subtract: ['$amountPaise', { $add: ['$paidPaise', { $ifNull: ['$externalPaidPaise', 0] }] }] }] };
   const rentOverdueFilter = { kind: 'RENT', ...rentChargeMongoFilter('OVERDUE', now) };
-  const [activeResidents, totalBeds, occupiedBeds, rentBilled, rentCollected, externalRentCollected, balances, rentOutstanding, openingOutstanding, overdueBalances, overdueResidentIds, utilityPending, securityDepositsHeld, upcomingDues, recentPayments, recentAdmissions] = await Promise.all([
+  const [activeResidents, totalBeds, occupiedBeds, rentBilled, rentCollected, externalRentCollected, balances, rentOutstanding, openingOutstanding, overdueBalances, overdueResidentIds, dueGraceBalances, dueGraceResidentIds, utilityPending, securityDepositsHeld, upcomingDues, recentPayments, recentAdmissions] = await Promise.all([
     Resident.countDocuments({ ...residentFilter, status: 'ACTIVE' }), Room.aggregate([{ $match: { active: true, ...roomMatch } }, { $group: { _id: null, total: { $sum: '$capacity' } } }]), RoomAllocation.countDocuments({ active: true, ...(roomScope.ids === null ? {} : { roomId: { $in: roomScope.ids } }) }),
     Charge.aggregate([{ $match: { kind: 'RENT', periodKey: currentPeriod, ...chargeResidentFilter } }, { $group: { _id: null, total: { $sum: '$amountPaise' } } }]),
     Payment.aggregate([{ $match: { paymentDate: { $gte: monthStart, $lt: monthEnd }, reversedAt: null, ...paymentResidentFilter } }, { $unwind: '$allocations' }, { $lookup: { from: 'charges', localField: 'allocations.chargeId', foreignField: '_id', as: 'charge' } }, { $unwind: '$charge' }, { $match: { 'charge.kind': 'RENT' } }, { $group: { _id: null, total: { $sum: '$allocations.amountPaise' } } }]),
@@ -45,6 +45,8 @@ router.get('/dashboard', requirePermission('dashboard:read'), asyncHandler(async
     Charge.aggregate([{ $match: { kind: 'OPENING_BALANCE', ...chargeResidentFilter, $expr: { $gt: [rentBalanceExpr, 0] } } }, { $group: { _id: null, total: { $sum: rentBalanceExpr } } }]),
     Charge.aggregate([{ $match: { ...rentOverdueFilter, ...chargeResidentFilter } }, { $group: { _id: null, total: { $sum: rentBalanceExpr } } }]),
     Charge.distinct('residentId', { ...rentOverdueFilter, ...chargeResidentFilter }),
+    Charge.aggregate([{ $match: { kind: 'RENT', ...rentChargeMongoFilter('DUE_GRACE', now), ...chargeResidentFilter } }, { $group: { _id: null, total: { $sum: rentBalanceExpr } } }]),
+    Charge.distinct('residentId', { kind: 'RENT', ...rentChargeMongoFilter('DUE_GRACE', now), ...chargeResidentFilter }),
     Charge.aggregate([{ $match: { kind: 'UTILITY', ...chargeResidentFilter, $expr: { $lt: [{ $add: ['$paidPaise', { $ifNull: ['$externalPaidPaise', 0] }] }, '$amountPaise'] } } }, { $group: { _id: null, total: { $sum: { $max: [0, { $subtract: ['$amountPaise', { $add: ['$paidPaise', { $ifNull: ['$externalPaidPaise', 0] }] }] }] } } } }]),
     DepositTransaction.aggregate([
       { $match: chargeResidentFilter },
@@ -91,18 +93,20 @@ router.get('/dashboard', requirePermission('dashboard:read'), asyncHandler(async
     vacantBeds: Math.max(0, genderBeds[gender].totalBeds - genderBeds[gender].occupiedBeds),
   }]));
   const legacyRent = balances.filter((x) => x._id === 'RENT' || x._id === 'OPENING_BALANCE').reduce((sum, charge) => sum + charge.amount, 0);
-  const overdueResidents = await Resident.find({ _id: { $in: overdueResidentIds }, status: { $in: ['ACTIVE', 'NOTICE'] } }).select('_id residentId fullName').limit(8).lean();
-  const overdueChargeRows = overdueResidents.length ? await Charge.find({ residentId: { $in: overdueResidents.map((resident) => resident._id) }, ...rentOverdueFilter }).sort({ dueAt: 1 }).lean() : [];
-  const allocations = await RoomAllocation.find({ residentId: { $in: overdueResidents.map((resident) => resident._id) }, active: true }).populate('roomId', 'roomNumber propertyName').lean();
+  const rentFollowUpIds = [...new Set([...overdueResidentIds.slice(0, 4), ...dueGraceResidentIds.slice(0, 4)].map(String))];
+  const rentFollowUpResidents = await Resident.find({ _id: { $in: rentFollowUpIds }, status: { $in: ['ACTIVE', 'NOTICE'] } }).select('_id residentId fullName').limit(8).lean();
+  const rentFollowUpChargeFilter = { kind: 'RENT', $or: [rentChargeMongoFilter('OVERDUE', now), rentChargeMongoFilter('DUE_GRACE', now)] };
+  const rentFollowUpChargeRows = rentFollowUpResidents.length ? await Charge.find({ residentId: { $in: rentFollowUpResidents.map((resident) => resident._id) }, ...rentFollowUpChargeFilter }).sort({ dueAt: 1 }).lean() : [];
+  const allocations = await RoomAllocation.find({ residentId: { $in: rentFollowUpResidents.map((resident) => resident._id) }, active: true }).populate('roomId', 'roomNumber propertyName').lean();
   const allocationByResident = new Map(allocations.map((allocation) => [String(allocation.residentId), allocation]));
-  const overdueFollowUps = overdueResidents.map((resident) => {
-    const residentCharges = overdueChargeRows.filter((charge) => String(charge.residentId) === String(resident._id));
+  const rentFollowUps = rentFollowUpResidents.map((resident) => {
+    const residentCharges = rentFollowUpChargeRows.filter((charge) => String(charge.residentId) === String(resident._id));
     const rentSummary = summarizeRentCharges(residentCharges, now);
     const allocation = allocationByResident.get(String(resident._id));
     const room = allocation?.roomId as unknown as { roomNumber?: string; propertyName?: string } | null;
-    return { residentId: String(resident._id), residentCode: resident.residentId, fullName: resident.fullName, outstandingRentPaise: rentSummary.balancePaise, dueAt: rentSummary.dueAt, daysPastDue: rentSummary.daysPastDue, roomNumber: room?.roomNumber ?? '', bedId: allocation?.bedId ?? '', propertyName: room?.propertyName ?? '' };
+    return { residentId: String(resident._id), residentCode: resident.residentId, fullName: resident.fullName, outstandingRentPaise: rentSummary.balancePaise, dueAt: rentSummary.dueAt, daysPastDue: rentSummary.daysPastDue, rentStatus: rentSummary.status, roomNumber: room?.roomNumber ?? '', bedId: allocation?.bedId ?? '', propertyName: room?.propertyName ?? '' };
   });
-  return res.json({ period: { start: monthStart, end: monthEnd, periodKey: currentPeriod }, metrics: { activeResidents, totalBeds: totalBeds[0]?.total ?? 0, occupiedBeds, availableBeds: Math.max(0, (totalBeds[0]?.total ?? 0) - occupiedBeds), genderBreakdown, rentBilledPaise: rentBilled[0]?.total ?? 0, rentCollectedPaise: (rentCollected[0]?.total ?? 0) + (externalRentCollected[0]?.total ?? 0), outstandingRentPaise: legacyRent, totalOutstandingRentPaise: rentOutstanding[0]?.total ?? 0, openingBalanceOutstandingPaise: openingOutstanding[0]?.total ?? 0, overdueRentPaise: overdueBalances[0]?.total ?? 0, overdueRentResidentCount: overdueResidentIds.length, pendingUtilityPaise: utilityPending[0]?.total ?? 0, securityDepositsHeldPaise: securityDepositsHeld[0]?.total ?? 0 }, overdueFollowUps, upcomingDues, recentPayments, recentAdmissions });
+  return res.json({ period: { start: monthStart, end: monthEnd, periodKey: currentPeriod }, metrics: { activeResidents, totalBeds: totalBeds[0]?.total ?? 0, occupiedBeds, availableBeds: Math.max(0, (totalBeds[0]?.total ?? 0) - occupiedBeds), genderBreakdown, rentBilledPaise: rentBilled[0]?.total ?? 0, rentCollectedPaise: (rentCollected[0]?.total ?? 0) + (externalRentCollected[0]?.total ?? 0), outstandingRentPaise: legacyRent, totalOutstandingRentPaise: rentOutstanding[0]?.total ?? 0, openingBalanceOutstandingPaise: openingOutstanding[0]?.total ?? 0, overdueRentPaise: overdueBalances[0]?.total ?? 0, overdueRentResidentCount: overdueResidentIds.length, dueGraceRentPaise: dueGraceBalances[0]?.total ?? 0, dueGraceRentResidentCount: dueGraceResidentIds.length, pendingUtilityPaise: utilityPending[0]?.total ?? 0, securityDepositsHeldPaise: securityDepositsHeld[0]?.total ?? 0 }, rentFollowUps, upcomingDues, recentPayments, recentAdmissions });
 }));
 
 router.get('/staff', requirePermission('staff:read'), asyncHandler(async (_req, res) => {

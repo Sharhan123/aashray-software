@@ -47,7 +47,12 @@ describe('authentication REST endpoints', () => {
   it('creates a cookie-backed session after valid credentials', async () => {
     vi.mocked(authenticate).mockResolvedValue({
       user: { id: 'user-1', name: 'Aashray Owner', email: 'owner@example.com', role: 'SUPER_ADMIN', permissions: [] } as never,
-      rawToken: 'opaque-session-token', expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+      rawToken: 'opaque-session-token',
+      rawRefreshToken: 'opaque-refresh-token',
+      accessExpiresAt: new Date(Date.now() + 15 * 60 * 1000),
+      refreshExpiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      absoluteExpiresAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
+      expiresAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
     });
     const response = await client.post('/api/auth/login').send({ email: 'owner@example.com', password: 'private-passphrase' });
     expect(response.status).toBe(200);

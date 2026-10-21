@@ -18,6 +18,8 @@ type SearchableSelectProps = {
   required?: boolean;
   disabled?: boolean;
   onChange?: (value: string) => void;
+  onSearchChange?: (value: string) => void;
+  loading?: boolean;
 };
 
 export function SearchableSelect({
@@ -31,6 +33,8 @@ export function SearchableSelect({
   required = false,
   disabled = false,
   onChange,
+  onSearchChange,
+  loading = false,
 }: SearchableSelectProps) {
   const id = useId();
   const [internalValue, setInternalValue] = useState(defaultValue);
@@ -93,12 +97,13 @@ export function SearchableSelect({
         required={required && !selectedValue}
         placeholder={open ? placeholder : selected?.label ?? placeholder}
         value={open ? query : selected?.label ?? ''}
-        onFocus={() => { setOpen(true); setQuery(''); setActiveIndex(0); }}
+        onFocus={() => { setOpen(true); setQuery(''); setActiveIndex(0); onSearchChange?.(''); }}
         onBlur={() => window.setTimeout(() => setOpen(false), 120)}
         onChange={(event) => {
           setQuery(event.target.value);
           setOpen(true);
           setActiveIndex(0);
+          onSearchChange?.(event.target.value);
         }}
         onKeyDown={handleKeyDown}
       />
@@ -106,7 +111,7 @@ export function SearchableSelect({
       {name && <input type="hidden" name={name} value={selectedValue} disabled={disabled} />}
       {open && !disabled && (
         <div className="searchable-select-options" id={`${id}-options`} role="listbox">
-          {filtered.length ? filtered.map((option, index) => (
+          {loading ? <div className="searchable-select-empty" role="status">Searching residents…</div> : filtered.length ? filtered.map((option, index) => (
             <div
               id={`${id}-option-${index}`}
               className={`searchable-select-option ${option.value === selectedValue ? 'searchable-select-option-selected' : ''} ${index === activeIndex ? 'searchable-select-option-active' : ''}`}
@@ -120,7 +125,7 @@ export function SearchableSelect({
               <span>{option.label}</span>
               {option.value === selectedValue && <Check size={15} aria-hidden="true" />}
             </div>
-          )) : <div className="searchable-select-empty" role="status">No matching options</div>}
+          )) : <div className="searchable-select-empty" role="status">{normalizedQuery ? 'No matching options' : 'Type to search residents'}</div>}
         </div>
       )}
     </div>

@@ -24,7 +24,9 @@ const router = Router(); router.use(requireAuth);
 const id = z.string().regex(/^[a-f\d]{24}$/i); const day = z.coerce.date();
 function rangeDate(value: unknown, upperBoundary = false) {
   const text = String(value); const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
-  if (upperBoundary && match) return new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 18, 29, 59, 999));
+  if (match) return upperBoundary
+    ? new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 18, 29, 59, 999))
+    : new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), -5, -30));
   return new Date(text);
 }
 
@@ -107,6 +109,23 @@ router.post('/utilities', requirePermission('utilities:write'), asyncHandler(asy
   } catch (error) { if ((error as { code?: number }).code === 11000) return res.status(200).json({ charge: await Charge.findOne({ idempotencyKey: utilityIdempotencyKey }) }); throw error; }
 }));
 
+router.get('/deposits', requirePermission('payments:read'), asyncHandler(async (req, res) => {
+  const scope = await scopedResidentIds(req);
+  if (scope.forbidden) return res.status(403).json({ error: 'You do not have access to these resident records.' });
+  const balanceRows = await DepositTransaction.aggregate([
+    ...(scope.ids === null ? [] : [{ $match: { residentId: { $in: scope.ids } } }]),
+    { $group: { _id: '$residentId', balancePaise: { $sum: { $switch: { branches: [{ case: { $eq: ['$kind', 'RECEIVED'] }, then: '$amountPaise' }, { case: { $in: ['$kind', ['REFUNDED', 'APPLIED']] }, then: { $multiply: ['$amountPaise', -1] } }], default: 0 } } } } },
+    { $match: { balancePaise: { $gt: 0 } } },
+  ]);
+  const residents = await Resident.find({ _id: { $in: balanceRows.map((row) => row._id) } }).select('_id residentId fullName status').lean();
+  const residentById = new Map(residents.map((resident) => [String(resident._id), resident]));
+  const deposits = balanceRows.flatMap((row) => {
+    const resident = residentById.get(String(row._id));
+    return resident ? [{ residentId: String(resident._id), residentCode: resident.residentId, fullName: resident.fullName, status: resident.status, balancePaise: row.balancePaise as number }] : [];
+  }).sort((a, b) => a.fullName.localeCompare(b.fullName));
+  return res.json({ deposits });
+}));
+
 router.post('/deposits', requirePermission('payments:write'), asyncHandler(async (req, res) => {
   const data = z.object({ residentId: id, amount: z.number().positive().max(10000000), kind: z.enum(['RECEIVED', 'REFUNDED']), paymentMethod: z.enum(['CASH', 'BANK_TRANSFER', 'UPI', 'OTHER']), reference: z.string().max(120).default(''), reason: z.string().trim().min(5).max(1000), idempotencyKey: z.string().uuid() }).parse(req.body);
   if (!await residentIsInScope(req, data.residentId)) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
@@ -170,6 +189,71 @@ router.get('/payments', requirePermission('payments:read'), asyncHandler(async (
   if (req.query.from || req.query.to) filter.paymentDate = { ...(req.query.from ? { $gte: rangeDate(req.query.from) } : {}), ...(req.query.to ? { $lte: rangeDate(req.query.to, true) } : {}) };
   const [payments, total] = await Promise.all([Payment.find(filter).populate('residentId', 'residentId fullName mobile').sort({ paymentDate: -1 }).skip((page - 1) * limit).limit(limit).lean(), Payment.countDocuments(filter)]);
   return res.json({ payments: payments.map((payment) => { const allocatedPaise = payment.reversedAt ? 0 : payment.allocations.reduce((sum, allocation) => sum + allocation.amountPaise, 0); const unallocatedPaise = payment.reversedAt ? 0 : payment.amountPaise - allocatedPaise; return { ...payment, allocatedPaise, unallocatedPaise, allocationStatus: payment.reversedAt ? 'REVERSED' : unallocatedPaise ? allocatedPaise ? 'PARTIALLY_ALLOCATED' : 'UNALLOCATED' : 'ALLOCATED' }; }), page, limit, total, pages: Math.ceil(total / limit) });
+}));
+
+router.get('/payment-ledger/:kind', requirePermission('payments:read'), asyncHandler(async (req, res) => {
+  const kind = z.enum(['all', 'rent', 'utilities', 'deposits']).parse(req.params.kind);
+  const range = z.object({ from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() }).refine((value) => !value.from || !value.to || value.from <= value.to, { message: 'The end date must be on or after the start date.' }).parse(req.query);
+  const dateFilter = (field: 'paymentDate' | 'createdAt') => range.from || range.to ? { [field]: { ...(range.from ? { $gte: rangeDate(range.from) } : {}), ...(range.to ? { $lte: rangeDate(range.to, true) } : {}) } } : {};
+  const requestedPropertyId = req.query.propertyId && id.safeParse(req.query.propertyId).success ? String(req.query.propertyId) : undefined;
+  const scope = await scopedResidentIds(req, requestedPropertyId);
+  if (scope.forbidden) return res.status(403).json({ error: 'You do not have access to this property.' });
+  const residentFilter = scope.ids === null ? {} : { residentId: { $in: scope.ids } };
+
+  if (kind === 'all') {
+    const [payments, deposits] = await Promise.all([
+      Payment.find({ ...residentFilter, ...dateFilter('paymentDate') }).populate('residentId', 'residentId fullName').sort({ paymentDate: -1 }).limit(5000).lean(),
+      DepositTransaction.find({ ...residentFilter, ...dateFilter('createdAt') }).populate('residentId', 'residentId fullName').sort({ createdAt: -1 }).limit(5000).lean(),
+    ]);
+    const chargeIds = [...new Set(payments.flatMap((payment) => payment.allocations.map((allocation) => String(allocation.chargeId))))];
+    const charges = chargeIds.length ? await Charge.find({ _id: { $in: chargeIds } }).select('_id kind description').lean() : [];
+    const chargeMap = new Map(charges.map((charge) => [String(charge._id), charge]));
+    const paymentRows = payments.map((payment) => {
+      const resident = payment.residentId as unknown as { _id?: unknown; residentId?: string; fullName?: string } | null;
+      const allocatedPaise = payment.reversedAt ? 0 : payment.allocations.reduce((sum, allocation) => sum + allocation.amountPaise, 0);
+      const matched = payment.allocations.map((allocation) => ({ allocation, charge: chargeMap.get(String(allocation.chargeId)) })).filter((item) => item.charge);
+      const kinds = [...new Set(matched.map((item) => item.charge!.kind))];
+      const type = kinds.length > 1 ? 'MIXED' : kinds[0] ?? 'OTHER';
+      return {
+        id: String(payment._id), paymentId: String(payment._id), residentId: resident?._id ? String(resident._id) : '', resident: resident?.fullName ?? 'Resident', residentCode: resident?.residentId ?? '',
+        date: payment.paymentDate, type, description: [...new Set(matched.map((item) => item.charge!.description))].join(', '), method: payment.method,
+        amountRupees: payment.amountPaise / 100, categoryAmountRupees: matched.reduce((sum, item) => sum + item.allocation.amountPaise, 0) / 100,
+        amountPaise: payment.amountPaise, unallocatedPaise: payment.reversedAt ? 0 : payment.amountPaise - allocatedPaise,
+        reference: payment.reference || '', notes: payment.notes || '', status: payment.reversedAt ? 'REVERSED' : 'RECORDED',
+        allocationStatus: payment.reversedAt ? 'REVERSED' : payment.amountPaise - allocatedPaise ? allocatedPaise ? 'PARTIALLY_ALLOCATED' : 'UNALLOCATED' : 'ALLOCATED',
+        allocations: payment.allocations, reversedAt: payment.reversedAt ?? null,
+      };
+    });
+    const depositRows = deposits.map((entry) => {
+      const resident = entry.residentId as unknown as { residentId?: string; fullName?: string } | null;
+      return { id: String(entry._id), date: entry.createdAt, resident: resident?.fullName ?? 'Resident', residentCode: resident?.residentId ?? '', type: 'DEPOSIT', entry: entry.kind, method: entry.paymentMethod, amountRupees: entry.amountPaise / 100, reference: entry.reference || '', notes: '', reason: entry.reason || '', status: entry.kind };
+    });
+    return res.json({ rows: [...paymentRows, ...depositRows].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()) });
+  }
+
+  if (kind === 'deposits') {
+    const entries = await DepositTransaction.find({ ...residentFilter, ...dateFilter('createdAt') }).populate('residentId', 'residentId fullName').sort({ createdAt: -1 }).limit(5000).lean();
+    return res.json({ rows: entries.map((entry) => {
+      const resident = entry.residentId as unknown as { residentId?: string; fullName?: string } | null;
+      return { date: entry.createdAt, resident: resident?.fullName ?? 'Resident', residentCode: resident?.residentId ?? '', entry: entry.kind, method: entry.paymentMethod, amountRupees: entry.amountPaise / 100, reference: entry.reference || '', reason: entry.reason || '' };
+    }) });
+  }
+
+  const chargeKind = kind === 'rent' ? 'RENT' : 'UTILITY';
+  const charges = await Charge.find({ ...residentFilter, kind: chargeKind }).select('_id description utilityType').lean();
+  if (!charges.length) return res.json({ rows: [] });
+  const chargeMap = new Map(charges.map((charge) => [String(charge._id), charge]));
+  const payments = await Payment.find({ ...residentFilter, ...dateFilter('paymentDate'), 'allocations.chargeId': { $in: charges.map((charge) => charge._id) } }).populate('residentId', 'residentId fullName').sort({ paymentDate: -1 }).limit(5000).lean();
+  const rows = payments.map((payment) => {
+    const resident = payment.residentId as unknown as { residentId?: string; fullName?: string } | null;
+    const matched = payment.allocations.flatMap((allocation) => {
+      const charge = chargeMap.get(String(allocation.chargeId));
+      return charge ? [{ description: charge.description, amountPaise: allocation.amountPaise }] : [];
+    });
+    const categoryAmountPaise = matched.reduce((sum, allocation) => sum + allocation.amountPaise, 0);
+    return { paymentId: String(payment._id), date: payment.paymentDate, resident: resident?.fullName ?? 'Resident', residentCode: resident?.residentId ?? '', description: [...new Set(matched.map((allocation) => allocation.description))].join(', '), method: payment.method, amountRupees: payment.amountPaise / 100, categoryAmountRupees: categoryAmountPaise / 100, reference: payment.reference || '', notes: payment.notes || '', status: payment.reversedAt ? 'REVERSED' : 'RECORDED' };
+  });
+  return res.json({ rows });
 }));
 
 router.post('/payments', requirePermission('payments:write'), asyncHandler(async (req, res) => {
