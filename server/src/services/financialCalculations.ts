@@ -2,7 +2,7 @@ import { chargeStatus } from './billingRules.js';
 import { classifyRentCharge } from './rentStatus.js';
 
 export interface ChargeLedgerInput { amountPaise: number; paidPaise?: number; externalPaidPaise?: number; dueAt: Date }
-export interface ResidentChargeInput extends ChargeLedgerInput { kind: 'RENT' | 'UTILITY' | 'OPENING_BALANCE'; periodKey?: string }
+export interface ResidentChargeInput extends ChargeLedgerInput { kind: 'RENT' | 'UTILITY' | 'OPENING_BALANCE' | 'CHECKOUT_ADJUSTMENT'; periodKey?: string }
 export function chargeBalance(charge: ChargeLedgerInput): number {
   return Math.max(0, charge.amountPaise - (charge.paidPaise ?? 0) - (charge.externalPaidPaise ?? 0));
 }

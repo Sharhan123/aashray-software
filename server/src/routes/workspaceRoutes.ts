@@ -16,6 +16,7 @@ import { ResidentMigration } from '../models/ResidentMigration.js';
 import { MessageLog } from '../models/MessageLog.js';
 import { AppSettings } from '../models/AppSettings.js';
 import { AuditEvent } from '../models/AuditEvent.js';
+import { OwnerReminder } from '../models/OwnerReminder.js';
 import { requireAuth, requirePermission, requireRole } from '../middleware/auth.js';
 import { chargeBalance, chargeLedger, rentChargeLedger } from '../services/financialCalculations.js';
 import { periodKeyFor } from '../services/billingRules.js';
@@ -107,6 +108,110 @@ router.get('/dashboard', requirePermission('dashboard:read'), asyncHandler(async
     return { residentId: String(resident._id), residentCode: resident.residentId, fullName: resident.fullName, outstandingRentPaise: rentSummary.balancePaise, dueAt: rentSummary.dueAt, daysPastDue: rentSummary.daysPastDue, rentStatus: rentSummary.status, roomNumber: room?.roomNumber ?? '', bedId: allocation?.bedId ?? '', propertyName: room?.propertyName ?? '' };
   });
   return res.json({ period: { start: monthStart, end: monthEnd, periodKey: currentPeriod }, metrics: { activeResidents, totalBeds: totalBeds[0]?.total ?? 0, occupiedBeds, availableBeds: Math.max(0, (totalBeds[0]?.total ?? 0) - occupiedBeds), genderBreakdown, rentBilledPaise: rentBilled[0]?.total ?? 0, rentCollectedPaise: (rentCollected[0]?.total ?? 0) + (externalRentCollected[0]?.total ?? 0), outstandingRentPaise: legacyRent, totalOutstandingRentPaise: rentOutstanding[0]?.total ?? 0, openingBalanceOutstandingPaise: openingOutstanding[0]?.total ?? 0, overdueRentPaise: overdueBalances[0]?.total ?? 0, overdueRentResidentCount: overdueResidentIds.length, dueGraceRentPaise: dueGraceBalances[0]?.total ?? 0, dueGraceRentResidentCount: dueGraceResidentIds.length, pendingUtilityPaise: utilityPending[0]?.total ?? 0, securityDepositsHeldPaise: securityDepositsHeld[0]?.total ?? 0 }, rentFollowUps, upcomingDues, recentPayments, recentAdmissions });
+}));
+
+router.get('/dashboard/rent-summary', requirePermission('dashboard:read'), asyncHandler(async (req, res) => {
+  const currentPeriod = periodKeyFor(new Date());
+  const periodKey = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).optional().parse(req.query.periodKey) ?? currentPeriod;
+  const [year, month] = periodKey.split('-').map(Number);
+  const start = new Date(Date.UTC(year!, month! - 1, 1) - 330 * 60_000);
+  const end = new Date(Date.UTC(year!, month!, 1) - 330 * 60_000);
+  const scope = await scopedResidentIds(req);
+  const residentFilter = scope.ids === null ? {} : { residentId: { $in: scope.ids } };
+  const [billedRows, collectedRows, migrationRows] = await Promise.all([
+    Charge.find({ kind: 'RENT', periodKey, ...residentFilter }).populate('residentId', 'residentId fullName').lean(),
+    Payment.aggregate([
+      { $match: { paymentDate: { $gte: start, $lt: end }, reversedAt: null, ...residentFilter } },
+      { $unwind: '$allocations' },
+      { $lookup: { from: 'charges', localField: 'allocations.chargeId', foreignField: '_id', as: 'charge' } },
+      { $unwind: '$charge' },
+      { $match: { 'charge.kind': 'RENT' } },
+      { $group: { _id: '$residentId', amountPaise: { $sum: '$allocations.amountPaise' } } },
+    ]),
+    ResidentMigration.find({ periodKey, ...residentFilter }).select('residentId currentPeriodSettledPaise').lean(),
+  ]);
+  const rowsByResident = new Map<string, { residentObjectId: string; residentId: string; name: string; billedPaise: number; collectedPaise: number }>();
+  const getRow = (id: string, residentId = '', name = '') => {
+    let row = rowsByResident.get(id);
+    if (!row) { row = { residentObjectId: id, residentId, name, billedPaise: 0, collectedPaise: 0 }; rowsByResident.set(id, row); }
+    else { if (residentId) row.residentId = residentId; if (name) row.name = name; }
+    return row;
+  };
+  for (const charge of billedRows) {
+    const resident = charge.residentId as unknown as { _id: Types.ObjectId; residentId?: string; fullName?: string } | null;
+    if (!resident) continue;
+    getRow(String(resident._id), resident.residentId ?? '', resident.fullName ?? '').billedPaise += charge.amountPaise;
+  }
+  for (const payment of collectedRows) getRow(String(payment._id)).collectedPaise += Number(payment.amountPaise ?? 0);
+  for (const migration of migrationRows) getRow(String(migration.residentId)).collectedPaise += migration.currentPeriodSettledPaise;
+  const residentIds = [...rowsByResident.keys()].filter((id) => !rowsByResident.get(id)?.name);
+  if (residentIds.length) {
+    const residents = await Resident.find({ _id: { $in: residentIds } }).select('residentId fullName').lean();
+    for (const resident of residents) getRow(String(resident._id), resident.residentId, resident.fullName);
+  }
+  const rows = [...rowsByResident.values()].map((row) => ({ ...row, outstandingPaise: Math.max(0, row.billedPaise - row.collectedPaise) })).sort((a, b) => a.name.localeCompare(b.name));
+  return res.json({ periodKey, rows, totals: { billedPaise: rows.reduce((sum, row) => sum + row.billedPaise, 0), collectedPaise: rows.reduce((sum, row) => sum + row.collectedPaise, 0), outstandingPaise: rows.reduce((sum, row) => sum + row.outstandingPaise, 0) } });
+}));
+
+router.get('/reminders', requireRole('SUPER_ADMIN'), asyncHandler(async (req, res) => {
+  const activeOnly = req.query.active === 'true';
+  const reminders = await OwnerReminder.find(activeOnly ? { active: true } : {}).sort({ active: -1, dueAt: 1 }).limit(500).lean();
+  return res.json({ reminders });
+}));
+router.get('/reminders/due', requireRole('SUPER_ADMIN'), asyncHandler(async (_req, res) => {
+  const reminders = await OwnerReminder.find({ active: true, dueAt: { $lte: new Date() } }).sort({ dueAt: 1 }).limit(20).lean();
+  return res.json({ reminders });
+}));
+router.post('/reminders', requireRole('SUPER_ADMIN'), asyncHandler(async (req, res) => {
+  const input = z.object({ title: z.string().trim().min(1).max(160), notes: z.string().trim().max(2000).default(''), dueAt: z.string().datetime(), repeatEveryHours: z.number().int().min(1).max(8760).nullable().default(null) }).parse(req.body);
+  const reminder = await OwnerReminder.create({ ...input, dueAt: new Date(input.dueAt), createdBy: req.user!.id });
+  await AuditEvent.create({ actorId: req.user!.id, action: 'OWNER_REMINDER_CREATED', entityType: 'OwnerReminder', entityId: String(reminder._id), details: { repeatEveryHours: reminder.repeatEveryHours } });
+  return res.status(201).json({ reminder });
+}));
+router.post('/reminders/:id/acknowledge', requireRole('SUPER_ADMIN'), asyncHandler(async (req, res) => {
+  if (!Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ error: 'Reminder not found.' });
+  const reminder = await OwnerReminder.findById(req.params.id);
+  if (!reminder || !reminder.active) return res.status(404).json({ error: 'Reminder not found.' });
+  const now = new Date();
+  if (reminder.repeatEveryHours) {
+    const intervalMs = reminder.repeatEveryHours * 60 * 60 * 1000;
+    const missedIntervals = Math.floor(Math.max(0, now.getTime() - reminder.dueAt.getTime()) / intervalMs) + 1;
+    reminder.dueAt = new Date(reminder.dueAt.getTime() + missedIntervals * intervalMs);
+  } else {
+    reminder.active = false;
+    reminder.completedAt = now;
+  }
+  await reminder.save();
+  await AuditEvent.create({ actorId: req.user!.id, action: 'OWNER_REMINDER_ACKNOWLEDGED', entityType: 'OwnerReminder', entityId: String(reminder._id) });
+  return res.json({ reminder });
+}));
+router.post('/reminders/:id/snooze', requireRole('SUPER_ADMIN'), asyncHandler(async (req, res) => {
+  if (!Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ error: 'Reminder not found.' });
+  const { minutes } = z.object({ minutes: z.union([z.literal(5), z.literal(10), z.literal(15), z.literal(30), z.literal(60), z.literal(120)]) }).parse(req.body);
+  const reminder = await OwnerReminder.findOne({ _id: req.params.id, active: true });
+  if (!reminder) return res.status(404).json({ error: 'Reminder not found.' });
+  reminder.dueAt = new Date(Date.now() + minutes * 60_000);
+  await reminder.save();
+  await AuditEvent.create({ actorId: req.user!.id, action: 'OWNER_REMINDER_SNOOZED', entityType: 'OwnerReminder', entityId: String(reminder._id), details: { minutes } });
+  return res.json({ reminder });
+}));
+router.post('/reminders/:id/stop', requireRole('SUPER_ADMIN'), asyncHandler(async (req, res) => {
+  if (!Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ error: 'Reminder not found.' });
+  const reminder = await OwnerReminder.findOne({ _id: req.params.id, active: true });
+  if (!reminder) return res.status(404).json({ error: 'Reminder not found.' });
+  reminder.active = false;
+  reminder.completedAt = new Date();
+  reminder.stoppedAt = reminder.completedAt;
+  await reminder.save();
+  await AuditEvent.create({ actorId: req.user!.id, action: 'OWNER_REMINDER_STOPPED', entityType: 'OwnerReminder', entityId: String(reminder._id) });
+  return res.json({ reminder });
+}));
+router.delete('/reminders/:id', requireRole('SUPER_ADMIN'), asyncHandler(async (req, res) => {
+  if (!Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ error: 'Reminder not found.' });
+  const reminder = await OwnerReminder.findByIdAndDelete(req.params.id);
+  if (!reminder) return res.status(404).json({ error: 'Reminder not found.' });
+  await AuditEvent.create({ actorId: req.user!.id, action: 'OWNER_REMINDER_DELETED', entityType: 'OwnerReminder', entityId: String(reminder._id) });
+  return res.status(204).end();
 }));
 
 router.get('/staff', requirePermission('staff:read'), asyncHandler(async (_req, res) => {

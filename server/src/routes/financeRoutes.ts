@@ -38,7 +38,7 @@ router.get('/charges', requirePermission('billing:read'), asyncHandler(async (re
   const scope = await scopedResidentIds(req, requestedPropertyId);
   if (scope.forbidden) return res.status(403).json({ error: 'You do not have access to this property.' });
   if (scope.ids !== null) { const current = filter.residentId; filter.residentId = { $in: current ? scope.ids.filter((residentId) => String(residentId) === String(current)) : scope.ids }; }
-  if (req.query.kind === 'RENT' || req.query.kind === 'UTILITY' || req.query.kind === 'OPENING_BALANCE') filter.kind = req.query.kind;
+  if (req.query.kind === 'RENT' || req.query.kind === 'UTILITY' || req.query.kind === 'OPENING_BALANCE' || req.query.kind === 'CHECKOUT_ADJUSTMENT') filter.kind = req.query.kind;
   if (req.query.period) {
     const period = String(req.query.period).slice(0, 7);
     if (/^\d{4}-(0[1-9]|1[0-2])$/.test(period)) {

@@ -6,7 +6,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://aashray-hospitality-api.onrender.com/api/:path*"
+      "destination": "https://aashray-software-server.vercel.app/api/:path*"
     },
     {
       "source": "/(.*)",

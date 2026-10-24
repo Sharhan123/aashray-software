@@ -2,7 +2,7 @@ import { Schema, model } from 'mongoose';
 
 const checkoutChargeSchema = new Schema({
   chargeId: { type: Schema.Types.ObjectId, ref: 'Charge', default: null },
-  kind: { type: String, enum: ['RENT', 'UTILITY', 'OPENING_BALANCE'], required: true },
+  kind: { type: String, enum: ['RENT', 'UTILITY', 'OPENING_BALANCE', 'CHECKOUT_ADJUSTMENT'], required: true },
   description: { type: String, required: true },
   periodKey: { type: String, required: true },
   servicePeriodStart: { type: Date, default: null },
@@ -10,6 +10,13 @@ const checkoutChargeSchema = new Schema({
   amountPaise: { type: Number, required: true, min: 1 },
   appliedPaise: { type: Number, required: true, min: 0 },
   remainingPaise: { type: Number, required: true, min: 0 },
+}, { _id: false });
+
+const cancelledRentSchema = new Schema({
+  chargeId: { type: Schema.Types.ObjectId, ref: 'Charge', required: true },
+  description: { type: String, required: true },
+  periodKey: { type: String, required: true },
+  amountPaise: { type: Number, required: true, min: 1 },
 }, { _id: false });
 
 const residentCheckoutSchema = new Schema({
@@ -29,6 +36,7 @@ const residentCheckoutSchema = new Schema({
   outstandingAfterPaise: { type: Number, required: true, min: 0 },
   charges: { type: [checkoutChargeSchema], default: [] },
   finalBills: { type: [checkoutChargeSchema], default: [] },
+  cancelledRentCharges: { type: [cancelledRentSchema], default: [] },
   idempotencyKey: { type: String, required: true, unique: true },
   createdBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
 }, { timestamps: true, versionKey: false });

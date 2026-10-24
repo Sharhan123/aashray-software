@@ -2,7 +2,7 @@ import { Schema, model, type HydratedDocument, type InferSchemaType } from 'mong
 
 const chargeSchema = new Schema({
   residentId: { type: Schema.Types.ObjectId, ref: 'Resident', required: true, index: true },
-  kind: { type: String, enum: ['RENT', 'UTILITY', 'OPENING_BALANCE'], required: true },
+  kind: { type: String, enum: ['RENT', 'UTILITY', 'OPENING_BALANCE', 'CHECKOUT_ADJUSTMENT'], required: true },
   utilityType: { type: String, default: '' },
   periodKey: { type: String, required: true },
   servicePeriodStart: { type: Date, default: null },

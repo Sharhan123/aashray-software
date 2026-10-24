@@ -43,6 +43,7 @@ export type CheckoutSummaryPdfData = {
   settlementStatus: string;
   charges: { description: string; periodKey?: string; servicePeriodStart?: string; servicePeriodEnd?: string; amountPaise: number; appliedPaise: number; remainingPaise: number; currentBalancePaise?: number }[];
   finalBills: { description: string; periodKey?: string; servicePeriodStart?: string; servicePeriodEnd?: string; amountPaise: number; appliedPaise: number; remainingPaise: number; currentBalancePaise?: number }[];
+  cancelledRentCharges?: { description: string; periodKey: string; amountPaise: number }[];
   resident?: { fullName?: string; residentId?: string; mobile?: string };
 };
 
@@ -341,6 +342,7 @@ function makeCheckoutCanvas(data: CheckoutSummaryPdfData, brandLogo: HTMLImageEl
   if (!shown.length) { drawAllocationRow(ctx, left, y, width, 'No outstanding charge recorded at checkout', 'Rs. 0.00'); y += 50; }
   else for (const row of shown) { const label = [row.description, chargePeriod(row)].filter(Boolean).join(' · '); const now = row.currentBalancePaise ?? row.remainingPaise; ctx.fillStyle = INK; ctx.font = '16px Arial, sans-serif'; ctx.textAlign = 'left'; ctx.fillText(fitText(ctx, label, width - 500), left + 12, y + 29); ctx.textAlign = 'right'; ctx.fillText(formatMoney(row.remainingPaise), right - 260, y + 29); ctx.fillText(formatMoney(now), right - 12, y + 29); drawRule(ctx, left, y + 48, width); y += 50; }
   if (rows.length > shown.length) { ctx.textAlign = 'left'; ctx.fillStyle = MUTED; ctx.font = '15px Arial, sans-serif'; ctx.fillText(`${rows.length - shown.length} additional charges are listed in the resident ledger.`, left + 12, y + 26); y += 42; }
+  if (data.cancelledRentCharges?.length) { ctx.textAlign = 'left'; ctx.fillStyle = MUTED; ctx.font = '15px Arial, sans-serif'; ctx.fillText(fitText(ctx, `Cancelled next-cycle rent: ${data.cancelledRentCharges.map((charge) => `${charge.periodKey} (${formatMoney(charge.amountPaise)})`).join(', ')}`, width - 24), left + 12, y + 24); y += 36; }
   y = Math.max(y + 30, 1330); drawSectionTitle(ctx, left, y, 'Security deposit refund');
   ctx.fillStyle = PALE_BLUE; ctx.fillRect(left, y + 20, width, 125); ctx.fillStyle = INK; ctx.textAlign = 'left'; ctx.font = '18px Arial, sans-serif';
   wrapText(ctx, `Refundable deposit: ${formatMoney(data.refundableRemainingPaise)}. This amount will be refunded only after 21 days from checkout, on or after ${deadline}. Refunds recorded to date: ${formatMoney(data.refundedToDatePaise)}.`, left + 20, y + 58, width - 40, 28, 3);

@@ -29,7 +29,7 @@ router.use(requireAuth);
 const date = z.coerce.date();
 const objectId = z.string().regex(/^[a-f\d]{24}$/i);
 const roomInput = z.object({ propertyId: objectId.optional(), roomNumber: z.string().trim().min(1).max(40), roomType: z.enum(['AC', 'NON_AC']), capacity: z.number().int().min(1).max(30), bedIds: z.array(z.string().trim().min(1).max(20)).optional(), notes: z.string().max(1000).default('') });
-const residentInput = z.object({ fullName: z.string().trim().min(2).max(140), gender: z.enum(['MALE', 'FEMALE']).optional(), mobile: z.string().trim().min(8).max(24), email: z.string().trim().email().max(254).or(z.literal('')).default(''), address: z.string().trim().max(500).default(''), referenceName: z.string().trim().max(140).default(''), referenceContact: z.string().trim().max(120).default(''), governmentId: z.string().max(80).default(''), emergencyContact: z.string().max(120).default(''), admissionDate: date, billingStartDate: date, roomId: objectId, bedId: z.string().trim().min(1).max(20), monthlyRent: z.number().positive().max(10000000), dueDay: z.number().int().min(1).max(31), securityDeposit: z.number().min(0).max(10000000).default(0), depositPaid: z.number().min(0).max(10000000).default(0), depositMethod: z.enum(['CASH', 'BANK_TRANSFER', 'UPI', 'OTHER']).default('CASH'), notes: z.string().max(3000).default(''), idempotencyKey: z.string().uuid() }).superRefine((value, ctx) => { if (value.depositPaid > value.securityDeposit) ctx.addIssue({ code: 'custom', path: ['depositPaid'], message: 'Deposit received cannot exceed the agreed security deposit.' }); });
+const residentInput = z.object({ fullName: z.string().trim().min(2).max(140), gender: z.enum(['MALE', 'FEMALE']).optional(), mobile: z.string().trim().min(8).max(24), email: z.string().trim().email().max(254).or(z.literal('')).default(''), address: z.string().trim().max(500).default(''), referenceName: z.string().trim().max(140).default(''), referenceContact: z.string().trim().max(120).default(''), governmentId: z.string().max(80).default(''), emergencyContact: z.string().max(120).default(''), admissionDate: date, billingStartDate: date, roomId: objectId, bedId: z.string().trim().min(1).max(20), monthlyRent: z.number().positive().max(10000000), dueDay: z.number().int().min(1).max(31), securityDeposit: z.number().min(0).max(10000000).default(0), depositPaid: z.number().min(0).max(10000000).default(0), depositMethod: z.enum(['CASH', 'BANK_TRANSFER', 'UPI', 'OTHER']).default('CASH'), rentPaidNow: z.number().min(0).max(10000000).default(0), rentPaymentMethod: z.enum(['CASH', 'BANK_TRANSFER', 'UPI', 'OTHER']).default('CASH'), rentPaymentReference: z.string().max(120).default(''), rentPaymentNotes: z.string().max(1000).default(''), notes: z.string().max(3000).default(''), idempotencyKey: z.string().uuid() }).superRefine((value, ctx) => { if (value.depositPaid > value.securityDeposit) ctx.addIssue({ code: 'custom', path: ['depositPaid'], message: 'Deposit received cannot exceed the agreed security deposit.' }); if (value.rentPaidNow > value.monthlyRent) ctx.addIssue({ code: 'custom', path: ['rentPaidNow'], message: 'Rent received now cannot exceed the initial monthly rent charge.' }); });
 
 function parseCsv(text: string): string[][] {
   const rows: string[][] = []; let row: string[] = []; let cell = ''; let quoted = false;
@@ -488,6 +488,8 @@ router.post('/residents/:id/checkout', requirePermission('residents:write'), asy
   const data = z.object({
     effectiveEndDate: date,
     reason: z.string().trim().min(5).max(500),
+    extraDays: z.number().int().min(0).max(90).default(0),
+    perDayRatePaise: z.number().int().min(0).max(100000000).default(0),
     // Kept in the request schema for compatibility with older clients. The
     // server now calculates all deposit offsets from the saved ledger.
     allocations: z.array(z.object({ chargeId: objectId, amountPaise: z.number().int().positive() })).max(100).default([]),
@@ -520,7 +522,22 @@ router.post('/residents/:id/checkout', requirePermission('residents:write'), asy
     }
     const depositEntries = await DepositTransaction.find({ residentId: current._id }).session(session).lean();
     const depositBalance = depositEntries.reduce((sum, entry) => sum + (entry.kind === 'RECEIVED' ? entry.amountPaise : ['REFUNDED', 'APPLIED'].includes(entry.kind) ? -entry.amountPaise : 0), 0);
+    // A rent charge is keyed to the calendar month in which its monthly cycle
+    // starts (for example, period 2026-10 with a due day of Oct 20 covers the
+    // Oct 20–Nov 20 stay). On checkout, cancel that cycle's fully unpaid rent.
+    const checkoutPeriod = periodKeyFor(data.effectiveEndDate);
+    const checkoutCycleCharges = await Charge.find({ residentId: current._id, kind: 'RENT', periodKey: checkoutPeriod, paidPaise: 0, externalPaidPaise: 0 }).session(session);
+    const cancelledRentCharges = checkoutCycleCharges.map((charge) => ({ chargeId: charge._id, description: charge.description, periodKey: charge.periodKey, amountPaise: charge.amountPaise }));
+    if (checkoutCycleCharges.length) {
+      await Charge.deleteMany({ _id: { $in: checkoutCycleCharges.map((charge) => charge._id) } }).session(session);
+    }
     const allCharges = await Charge.find({ residentId: current._id }).sort({ dueAt: 1, issuedAt: 1, _id: 1 }).session(session);
+    const extraDaysPaise = data.extraDays * data.perDayRatePaise;
+    if (extraDaysPaise > 0) {
+      const [extraDaysCharge] = await Charge.create([{ residentId: current._id, kind: 'CHECKOUT_ADJUSTMENT', periodKey: `CHECKOUT-${periodKeyFor(data.effectiveEndDate)}`, description: `Extra stay · ${data.extraDays} day${data.extraDays === 1 ? '' : 's'} × ₹${(data.perDayRatePaise / 100).toFixed(2)}/day`, amountPaise: extraDaysPaise, paidPaise: 0, externalPaidPaise: 0, issuedAt: new Date(), dueAt: data.effectiveEndDate, status: chargeStatus(extraDaysPaise, 0, data.effectiveEndDate), idempotencyKey: `checkout:${data.idempotencyKey}:extra-days`, createdBy: req.user!.id, audit: [] }], { session });
+      if (extraDaysCharge) allCharges.push(extraDaysCharge);
+    }
+    allCharges.sort((a, b) => a.dueAt.getTime() - b.dueAt.getTime() || a.issuedAt.getTime() - b.issuedAt.getTime() || String(a._id).localeCompare(String(b._id)));
     const balanceOf = (charge: typeof allCharges[number]) => Math.max(0, charge.amountPaise - charge.paidPaise - (charge.externalPaidPaise ?? 0));
     const balanceBeforeByCharge = new Map<string, number>(allCharges.map((charge): [string, number] => [String(charge._id), balanceOf(charge)]));
     const outstandingBeforePaise = [...balanceBeforeByCharge.values()].reduce((sum, balance) => sum + balance, 0);
@@ -566,7 +583,7 @@ router.post('/residents/:id/checkout', requirePermission('residents:write'), asy
       const amountPaise = balanceBeforeByCharge.get(String(charge._id)) ?? 0; const appliedPaise = appliedByCharge.get(String(charge._id)) ?? 0;
       return { chargeId: charge._id, kind: charge.kind, description: charge.description, periodKey: charge.periodKey, amountPaise, appliedPaise, remainingPaise: amountPaise - appliedPaise };
     });
-    const checkoutRecord = (await ResidentCheckout.create([{ residentId: current._id, checkoutDate: data.effectiveEndDate, checkedOutAt: new Date(), reason: data.reason, propertyName: checkoutProperty?.name ?? checkoutRoom?.propertyName ?? '', roomNumber: checkoutRoom?.roomNumber ?? '', bedId: checkoutAllocation?.bedId ?? '', outstandingBeforePaise, depositHeldPaise: depositBalance, appliedToChargesPaise: allocationTotal, refundedPaise: 0, depositRetainedPaise: remainingDepositPaise, outstandingAfterPaise: Math.max(0, outstandingBeforePaise + data.finalBills.reduce((sum, bill) => sum + bill.amountPaise, 0) - allocationTotal), charges: checkoutCharges, finalBills: finalBillCharges, idempotencyKey: data.idempotencyKey, createdBy: req.user!.id }], { session }))[0]!;
+    const checkoutRecord = (await ResidentCheckout.create([{ residentId: current._id, checkoutDate: data.effectiveEndDate, checkedOutAt: new Date(), reason: data.reason, propertyName: checkoutProperty?.name ?? checkoutRoom?.propertyName ?? '', roomNumber: checkoutRoom?.roomNumber ?? '', bedId: checkoutAllocation?.bedId ?? '', outstandingBeforePaise, depositHeldPaise: depositBalance, appliedToChargesPaise: allocationTotal, refundedPaise: 0, depositRetainedPaise: remainingDepositPaise, outstandingAfterPaise: Math.max(0, outstandingBeforePaise + data.finalBills.reduce((sum, bill) => sum + bill.amountPaise, 0) - allocationTotal), charges: checkoutCharges, finalBills: finalBillCharges, cancelledRentCharges, idempotencyKey: data.idempotencyKey, createdBy: req.user!.id }], { session }))[0]!;
     current.status = 'INACTIVE';
     current.effectiveEndDate = data.effectiveEndDate;
     current.checkoutIdempotencyKey = data.idempotencyKey;
@@ -574,7 +591,7 @@ router.post('/residents/:id/checkout', requirePermission('residents:write'), asy
     const currentRecord = current.allocations.find((item) => !item.endDate);
     if (currentRecord) currentRecord.endDate = data.effectiveEndDate;
     await current.save({ session });
-    await AuditEvent.create([{ actorId: req.user!.id, action: 'RESIDENT_CHECKED_OUT', entityType: 'Resident', entityId: String(current._id), reason: data.reason, details: { checkoutId: String(checkoutRecord._id), effectiveEndDate: data.effectiveEndDate, depositPaise: depositBalance, appliedToChargesPaise: allocationTotal, chargeAllocations: appliedEntries, finalBills: finalBillCharges, refundedPaise: 0, remainingDepositPaise } }], { session });
+    await AuditEvent.create([{ actorId: req.user!.id, action: 'RESIDENT_CHECKED_OUT', entityType: 'Resident', entityId: String(current._id), reason: data.reason, details: { checkoutId: String(checkoutRecord._id), effectiveEndDate: data.effectiveEndDate, depositPaise: depositBalance, appliedToChargesPaise: allocationTotal, chargeAllocations: appliedEntries, finalBills: finalBillCharges, cancelledRentCharges, extraDays: data.extraDays, perDayRatePaise: data.perDayRatePaise, extraDaysPaise, refundedPaise: 0, remainingDepositPaise } }], { session });
     return { resident: current, checkout: checkoutRecord, duplicate: false, depositBalancePaise: remainingDepositPaise };
   });
   return res.json(result);
