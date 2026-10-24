@@ -169,8 +169,9 @@ router.post('/reminders', requireRole('SUPER_ADMIN'), asyncHandler(async (req, r
   return res.status(201).json({ reminder });
 }));
 router.post('/reminders/:id/acknowledge', requireRole('SUPER_ADMIN'), asyncHandler(async (req, res) => {
-  if (!Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ error: 'Reminder not found.' });
-  const reminder = await OwnerReminder.findById(req.params.id);
+  const reminderId = req.params.id;
+  if (typeof reminderId !== 'string' || !Types.ObjectId.isValid(reminderId)) return res.status(404).json({ error: 'Reminder not found.' });
+  const reminder = await OwnerReminder.findById(reminderId);
   if (!reminder || !reminder.active) return res.status(404).json({ error: 'Reminder not found.' });
   const now = new Date();
   if (reminder.repeatEveryHours) {
@@ -186,9 +187,10 @@ router.post('/reminders/:id/acknowledge', requireRole('SUPER_ADMIN'), asyncHandl
   return res.json({ reminder });
 }));
 router.post('/reminders/:id/snooze', requireRole('SUPER_ADMIN'), asyncHandler(async (req, res) => {
-  if (!Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ error: 'Reminder not found.' });
+  const reminderId = req.params.id;
+  if (typeof reminderId !== 'string' || !Types.ObjectId.isValid(reminderId)) return res.status(404).json({ error: 'Reminder not found.' });
   const { minutes } = z.object({ minutes: z.union([z.literal(5), z.literal(10), z.literal(15), z.literal(30), z.literal(60), z.literal(120)]) }).parse(req.body);
-  const reminder = await OwnerReminder.findOne({ _id: req.params.id, active: true });
+  const reminder = await OwnerReminder.findOne({ _id: reminderId, active: true });
   if (!reminder) return res.status(404).json({ error: 'Reminder not found.' });
   reminder.dueAt = new Date(Date.now() + minutes * 60_000);
   await reminder.save();
@@ -196,8 +198,9 @@ router.post('/reminders/:id/snooze', requireRole('SUPER_ADMIN'), asyncHandler(as
   return res.json({ reminder });
 }));
 router.post('/reminders/:id/stop', requireRole('SUPER_ADMIN'), asyncHandler(async (req, res) => {
-  if (!Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ error: 'Reminder not found.' });
-  const reminder = await OwnerReminder.findOne({ _id: req.params.id, active: true });
+  const reminderId = req.params.id;
+  if (typeof reminderId !== 'string' || !Types.ObjectId.isValid(reminderId)) return res.status(404).json({ error: 'Reminder not found.' });
+  const reminder = await OwnerReminder.findOne({ _id: reminderId, active: true });
   if (!reminder) return res.status(404).json({ error: 'Reminder not found.' });
   reminder.active = false;
   reminder.completedAt = new Date();
@@ -207,8 +210,9 @@ router.post('/reminders/:id/stop', requireRole('SUPER_ADMIN'), asyncHandler(asyn
   return res.json({ reminder });
 }));
 router.delete('/reminders/:id', requireRole('SUPER_ADMIN'), asyncHandler(async (req, res) => {
-  if (!Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ error: 'Reminder not found.' });
-  const reminder = await OwnerReminder.findByIdAndDelete(req.params.id);
+  const reminderId = req.params.id;
+  if (typeof reminderId !== 'string' || !Types.ObjectId.isValid(reminderId)) return res.status(404).json({ error: 'Reminder not found.' });
+  const reminder = await OwnerReminder.findByIdAndDelete(reminderId);
   if (!reminder) return res.status(404).json({ error: 'Reminder not found.' });
   await AuditEvent.create({ actorId: req.user!.id, action: 'OWNER_REMINDER_DELETED', entityType: 'OwnerReminder', entityId: String(reminder._id) });
   return res.status(204).end();
