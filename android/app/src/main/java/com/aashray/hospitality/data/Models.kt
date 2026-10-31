@@ -15,6 +15,11 @@ data class UserDto(
 ) {
     fun can(permission: String): Boolean = role == "SUPER_ADMIN" || permission in permissions
 }
+data class StaffDto(val id: String = "", val name: String = "", val email: String = "", val active: Boolean = true, val permissions: List<String> = emptyList(), val propertyIds: List<String> = emptyList(), val lastLoginAt: String? = null)
+data class StaffListResponse(val staff: List<StaffDto> = emptyList())
+data class StaffCreateRequest(val name: String, val email: String, val password: String, val permissions: List<String>, val propertyIds: List<String>)
+data class StaffUpdateRequest(val active: Boolean? = null, val permissions: List<String>? = null, val propertyIds: List<String>? = null)
+data class StaffPasswordRequest(val password: String)
 
 data class AuthResponse(val user: UserDto? = null)
 data class CsrfResponse(val csrfToken: String = "")
@@ -39,11 +44,15 @@ data class DashboardMetricsDto(
     val rentCollectedPaise: Long = 0,
     val outstandingRentPaise: Long = 0,
     val overdueRentPaise: Long = 0,
+    val overdueRentResidentCount: Int = 0,
+    val dueGraceRentPaise: Long = 0,
+    val dueGraceRentResidentCount: Int = 0,
     val pendingUtilityPaise: Long = 0,
+    val securityDepositsHeldPaise: Long = 0,
 )
 
 @JsonAdapter(DueResidentDtoAdapter::class)
-data class DueResidentDto(val residentId: String? = null, val fullName: String? = null)
+data class DueResidentDto(val id: String? = null, val residentId: String? = null, val fullName: String? = null)
 
 class DueResidentDtoAdapter : JsonDeserializer<DueResidentDto> {
     override fun deserialize(json: JsonElement, typeOfT: Type, context: JsonDeserializationContext): DueResidentDto? {
@@ -51,8 +60,8 @@ class DueResidentDtoAdapter : JsonDeserializer<DueResidentDto> {
         if (json.isJsonPrimitive) return DueResidentDto(residentId = json.asString)
         val obj = json.asJsonObject
         return DueResidentDto(
-            residentId = obj.get("residentId")?.takeUnless(JsonElement::isJsonNull)?.asString
-                ?: obj.get("_id")?.takeUnless(JsonElement::isJsonNull)?.asString,
+            id = obj.get("_id")?.takeUnless(JsonElement::isJsonNull)?.asString,
+            residentId = obj.get("residentId")?.takeUnless(JsonElement::isJsonNull)?.asString,
             fullName = obj.get("fullName")?.takeUnless(JsonElement::isJsonNull)?.asString,
         )
     }
@@ -85,14 +94,18 @@ data class NewPropertyRequest(
     val contactPhone: String = "",
     val contactEmail: String = "",
     val notes: String = "",
+    val gender: String = "",
 )
 data class PropertyWriteResponse(val property: PropertyDto? = null)
+data class PropertyDeleteRequest(val reason: String)
 data class PropertyDto(
     val _id: String = "",
     val name: String = "",
     val address: String = "",
     val contactPhone: String = "",
     val contactEmail: String = "",
+    val notes: String = "",
+    val gender: String = "MALE",
     val active: Boolean = true,
     val totalRooms: Int = 0,
     val totalBeds: Int = 0,
@@ -106,6 +119,8 @@ data class PropertyFinancialsDto(
     val rentCollectedPaise: Long = 0,
     val rentOutstandingPaise: Long = 0,
     val utilityOutstandingPaise: Long = 0,
+    val overdueRentPaise: Long = 0,
+    val overdueResidentCount: Int = 0,
 )
 
 data class RoomResponse(val rooms: List<RoomDto> = emptyList())
@@ -119,9 +134,12 @@ data class RoomDto(
     val active: Boolean = true,
     val occupied: Int = 0,
     val available: Int = 0,
+    val occupiedBeds: List<String> = emptyList(),
+    val notes: String = "",
     val beds: List<BedDto> = emptyList(),
 )
 data class BedDto(val bedId: String = "", val active: Boolean = true)
+data class RoomWriteRequest(val propertyId: String, val roomNumber: String, val roomType: String, val capacity: Int, val bedIds: List<String> = emptyList(), val notes: String = "")
 
 data class ResidentListResponse(
     val residents: List<ResidentDto> = emptyList(),
@@ -146,7 +164,12 @@ data class ResidentDto(
     val governmentId: String = "",
     val notes: String = "",
     val rentSchedules: List<RentScheduleDto> = emptyList(),
+    val gender: String = "",
+    val rentSummary: ResidentRentSummaryDto? = null,
+    val expectedDepartureDate: String? = null,
+    val effectiveEndDate: String? = null,
 )
+data class ResidentRentSummaryDto(val balancePaise: Long = 0, val dueAt: String? = null, val daysPastDue: Int = 0, val status: String = "NO_BILL")
 data class RentScheduleDto(val monthlyRentPaise: Long = 0, val dueDay: Int = 5, val effectiveFrom: String? = null)
 data class AllocationDto(
     val roomId: RoomReferenceDto? = null,
@@ -159,12 +182,39 @@ data class RoomReferenceDto(val _id: String? = null, val roomNumber: String? = n
 data class ResidentProfileResponse(
     val resident: ResidentDto? = null,
     val allocations: List<AllocationDto> = emptyList(),
+    val charges: List<ChargeDto> = emptyList(),
+    val payments: List<PaymentDto> = emptyList(),
     val deposits: List<DepositTransactionDto> = emptyList(),
+    val checkouts: List<CheckoutSummaryDto> = emptyList(),
     val outstandingPaise: Long = 0,
     val overduePaise: Long = 0,
     val pendingUtilityPaise: Long = 0,
     val depositBalancePaise: Long = 0,
 )
+data class CheckoutRequest(
+    val effectiveEndDate: String,
+    val reason: String,
+    val extraDays: Int = 0,
+    val perDayRatePaise: Long = 0,
+    val idempotencyKey: String,
+)
+data class CheckoutResponse(val depositBalancePaise: Long = 0, val duplicate: Boolean = false)
+data class CheckoutSummaryDto(
+    val _id: String = "",
+    val checkoutDate: String? = null,
+    val reason: String = "",
+    val propertyName: String = "",
+    val roomNumber: String = "",
+    val bedId: String = "",
+    val depositRetainedPaise: Long = 0,
+    val settlementDuePaise: Long = 0,
+    val settlementStatus: String = "",
+    val refundedToDatePaise: Long = 0,
+    val refundableRemainingPaise: Long = 0,
+)
+data class CheckoutRefundRequest(val amount: Double, val paymentMethod: String, val reference: String = "", val reason: String, val idempotencyKey: String)
+data class CheckoutRefundResponse(val transaction: DepositTransactionDto? = null, val refundableRemainingPaise: Long = 0)
+data class ReadmitRequest(val propertyId: String, val roomId: String, val bedId: String, val admissionDate: String, val monthlyRent: Double, val idempotencyKey: String)
 
 data class ChargeListResponse(val charges: List<ChargeDto> = emptyList(), val page: Int = 1, val pages: Int = 0, val total: Int = 0)
 data class ChargeDto(
@@ -178,6 +228,7 @@ data class ChargeDto(
     val paidPaise: Long = 0,
     val externalPaidPaise: Long = 0,
     val balancePaise: Long = 0,
+    val issuedAt: String? = null,
     val dueAt: String? = null,
     val status: String = "PENDING",
 )
@@ -210,6 +261,15 @@ data class BillingSummaryDto(
 data class GenerateBillingRequest(val periodKey: String, val propertyId: String? = null, val confirmed: Boolean = true)
 data class BillingGenerationResponse(val periodKey: String = "", val created: Int = 0, val skipped: Int = 0, val createdPaise: Long = 0)
 data class PaymentListResponse(val payments: List<PaymentDto> = emptyList(), val page: Int = 1, val pages: Int = 0, val total: Int = 0)
+data class PaymentLedgerResponse(val rows: List<PaymentLedgerRowDto> = emptyList())
+data class PaymentLedgerRowDto(
+    val id: String = "", val paymentId: String? = null, val residentId: String? = null,
+    val resident: String = "Resident", val residentCode: String = "", val date: String? = null,
+    val type: String = "OTHER", val description: String = "", val entry: String = "",
+    val method: String = "", val amountRupees: Double = 0.0, val categoryAmountRupees: Double? = null,
+    val amountPaise: Long = 0, val unallocatedPaise: Long = 0, val reference: String = "",
+    val notes: String = "", val reason: String = "", val status: String = "", val allocationStatus: String = "",
+)
 data class PaymentDto(
     val _id: String = "",
     val residentId: DueResidentDto? = null,
@@ -217,6 +277,7 @@ data class PaymentDto(
     val paymentDate: String? = null,
     val method: String = "",
     val reference: String = "",
+    val notes: String = "",
     val allocations: List<PaymentAllocationDto> = emptyList(),
     val allocatedPaise: Long = 0,
     val unallocatedPaise: Long = 0,
@@ -236,6 +297,7 @@ data class NewPaymentRequest(
     val allocations: List<NewPaymentAllocation> = emptyList(),
     val idempotencyKey: String,
 )
+data class PaymentReverseRequest(val reason: String)
 data class PaymentResponse(val payment: PaymentDto? = null, val duplicate: Boolean = false)
 data class ReceiptChargeDto(val kind: String = "", val utilityType: String = "", val periodKey: String = "", val description: String = "")
 data class ReceiptBreakdownDto(val chargeId: String = "", val amountPaise: Long = 0, val charge: ReceiptChargeDto? = null)
@@ -293,6 +355,20 @@ data class AppSettingsDto(
 )
 data class DepositTransactionDto(val _id: String = "", val amountPaise: Long = 0, val kind: String = "", val paymentMethod: String = "", val reference: String = "", val reason: String = "", val createdAt: String? = null)
 data class DepositResponse(val transaction: DepositTransactionDto? = null, val balancePaise: Long = 0)
+data class OwnerReminderDto(
+    val _id: String = "",
+    val title: String = "",
+    val notes: String = "",
+    val dueAt: String = "",
+    val repeatEveryHours: Int? = null,
+    val active: Boolean = true,
+    val completedAt: String? = null,
+    val stoppedAt: String? = null,
+)
+data class OwnerReminderListResponse(val reminders: List<OwnerReminderDto> = emptyList())
+data class OwnerReminderResponse(val reminder: OwnerReminderDto? = null)
+data class OwnerReminderRequest(val title: String, val notes: String = "", val dueAt: String, val repeatEveryHours: Int? = null)
+data class SnoozeReminderRequest(val minutes: Int)
 data class NewResidentRequest(
     val fullName: String,
     val mobile: String,
@@ -326,3 +402,9 @@ data class EditResidentRequest(
 )
 data class ResidentWriteResponse(val resident: ResidentDto? = null, val duplicate: Boolean = false)
 data class RentPreviewResponse(val policy: String = "", val periodKey: String = "", val amountPaise: Long = 0, val dueAt: String? = null)
+data class ResidentImportRequest(val csv: String)
+data class ResidentImportCommitRequest(val csv: String, val previewId: String)
+data class ResidentImportRowDto(val row: Int = 0, val fullName: String = "", val mobile: String = "", val roomId: String = "", val bedId: String = "", val monthlyRent: Double = 0.0, val billingStartDate: String = "")
+data class ResidentImportErrorDto(val row: Int = 0, val message: String = "")
+data class ResidentImportPreviewDto(val previewId: String = "", val rows: List<ResidentImportRowDto> = emptyList(), val errors: List<ResidentImportErrorDto> = emptyList(), val validCount: Int = 0, val errorCount: Int = 0)
+data class ResidentImportCommitDto(val inserted: Int = 0, val skipped: Int = 0, val failed: Int = 0, val errors: List<ResidentImportErrorDto> = emptyList())

@@ -19,4 +19,7 @@ android/*.keystore
 android/.gradle/
 android/.gradle-user*/
 android/.android-user/
+android/.android-build-home/
+android/.android-verify-cache/
+android/.avd/
 android/**/build/

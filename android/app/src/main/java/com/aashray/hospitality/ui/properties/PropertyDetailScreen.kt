@@ -64,6 +64,16 @@ fun PropertyDetailScreen(
                 val data = current.value
                 item { PageIntro("Property overview", data.property.name, data.property.address.ifBlank { "Address not added" }) }
                 item {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = RoundedCornerShape(18.dp)) {
+                            Text(if (data.property.gender == "FEMALE") "FEMALE RESIDENCE" else "MALE RESIDENCE", Modifier.padding(horizontal = 12.dp, vertical = 7.dp), color = MaterialTheme.colorScheme.onPrimaryContainer, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                        }
+                        Surface(color = if (data.property.active) MaterialTheme.colorScheme.tertiaryContainer else MaterialTheme.colorScheme.errorContainer, shape = RoundedCornerShape(18.dp)) {
+                            Text(if (data.property.active) "ACTIVE" else "INACTIVE", Modifier.padding(horizontal = 12.dp, vertical = 7.dp), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+                item {
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         MetricCard("Rooms", data.property.totalRooms.toString(), "Active and inactive", Modifier.weight(1f))
                         MetricCard("Occupancy", "${data.property.occupiedBeds} / ${data.property.totalBeds}", "${data.property.vacantBeds} beds vacant", Modifier.weight(1f))
@@ -76,9 +86,17 @@ fun PropertyDetailScreen(
                     }
                 }
                 item {
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        MetricCard("Rent collected", money(data.property.financials.rentCollectedPaise), "This reporting period", Modifier.weight(1f))
+                        MetricCard("Rent billed", money(data.property.financials.rentBilledPaise), "This reporting period", Modifier.weight(1f))
+                    }
+                }
+                item {
                     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), shape = RoundedCornerShape(18.dp)) {
                         Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("Current period financials", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                            PropertyAmountRow("Property", data.property.name)
+                            PropertyAmountRow("Accommodation", if (data.property.gender == "FEMALE") "Female residents" else "Male residents")
                             PropertyAmountRow("Rent billed", money(data.property.financials.rentBilledPaise))
                             PropertyAmountRow("Rent collected", money(data.property.financials.rentCollectedPaise))
                             PropertyAmountRow("Rent outstanding", money(data.property.financials.rentOutstandingPaise))
@@ -115,7 +133,8 @@ fun PropertyDetailScreen(
                         Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
                                 Text(resident.fullName, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-                                Text("${resident.currentAllocation?.roomId?.roomNumber ?: "Room —"} · Bed ${resident.currentAllocation?.bedId ?: "—"}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("${resident.currentAllocation?.roomNumber ?: resident.currentAllocation?.roomId?.roomNumber ?: "Room —"} · Bed ${resident.currentAllocation?.bedId ?: "—"}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("Rent ${money(resident.currentRentPaise)} · Outstanding ${money(resident.outstandingPaise)}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                             Text(money(resident.outstandingPaise), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
                         }

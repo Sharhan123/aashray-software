@@ -15,7 +15,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Apartment
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Dashboard
+import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.PeopleAlt
 import androidx.compose.material.icons.filled.Payments
 import androidx.compose.material.icons.filled.RequestQuote
@@ -67,6 +71,11 @@ import com.aashray.hospitality.ui.operations.ReportsScreen
 import com.aashray.hospitality.ui.operations.RemindersScreen
 import com.aashray.hospitality.ui.operations.SettingsScreen
 import com.aashray.hospitality.ui.operations.UtilitiesScreen
+import com.aashray.hospitality.ui.operations.OwnerRemindersScreen
+import com.aashray.hospitality.ui.operations.StaffScreen
+import com.aashray.hospitality.ui.operations.RoomsScreen
+import com.aashray.hospitality.ui.operations.OwnerReminderAlarmHost
+import com.aashray.hospitality.ui.OperationsViewModel
 import com.aashray.hospitality.ui.operations.toolLinks
 
 private data class MainTab(val route: String, val title: String, val icon: androidx.compose.ui.graphics.vector.ImageVector, val permission: String)
@@ -74,24 +83,25 @@ private val mainTabs = listOf(
     MainTab("dashboard", "Home", Icons.Default.Dashboard, "dashboard:read"),
     MainTab("properties", "Properties", Icons.Default.Apartment, "rooms:read"),
     MainTab("residents", "Residents", Icons.Default.PeopleAlt, "residents:read"),
-    MainTab("billing", "Rent", Icons.Default.RequestQuote, "billing:write"),
     MainTab("payments", "Payments", Icons.Default.Payments, "payments:write"),
+    MainTab("operations", "More", Icons.Default.MoreHoriz, "operations"),
 )
 
 @Composable
-fun AashrayApp(sessionViewModel: SessionViewModel = hiltViewModel()) {
+fun AashrayApp(onToggleTheme: () -> Unit = {}, sessionViewModel: SessionViewModel = hiltViewModel()) {
     val session by sessionViewModel.state.collectAsStateWithLifecycle()
     when (val state = session) {
         SessionState.Loading -> FullScreenLoading("Connecting to Aashray")
         SessionState.SigningIn -> LoginScreen(isSigningIn = true, message = null, onSignIn = sessionViewModel::login)
         is SessionState.SignedOut -> LoginScreen(isSigningIn = false, message = state.message, onSignIn = sessionViewModel::login)
-        is SessionState.SignedIn -> AuthenticatedShell(state.user, sessionViewModel::logout)
+        is SessionState.SignedIn -> AuthenticatedShell(state.user, sessionViewModel::logout, onToggleTheme)
     }
 }
 
 @Composable
-private fun AuthenticatedShell(user: UserDto, onLogout: () -> Unit) {
+private fun AuthenticatedShell(user: UserDto, onLogout: () -> Unit, onToggleTheme: () -> Unit) {
     val navController = rememberNavController()
+    val operationsViewModel: OperationsViewModel = hiltViewModel()
     val start = when {
         user.can("dashboard:read") -> "dashboard"
         user.can("rooms:read") -> "properties"
@@ -101,14 +111,17 @@ private fun AuthenticatedShell(user: UserDto, onLogout: () -> Unit) {
         toolLinks.any { link -> link.permissions.all(user::can) } -> "operations"
         else -> "no-access"
     }
-    val tabs = mainTabs.filter { user.can(it.permission) }
+    val tabs = mainTabs.filter { tab -> if (tab.permission == "operations") toolLinks.any { link -> link.permissions.all(user::can) || link.permissions.contains("__owner_only__") && user.role == "SUPER_ADMIN" } else user.can(tab.permission) }
     val backStack by navController.currentBackStackEntryAsState()
     val destination = backStack?.destination
-    val activeTab = tabs.firstOrNull { tab -> destination?.route?.startsWith(tab.route) == true }
+    val activeTab = tabs.firstOrNull { tab ->
+        destination?.route?.startsWith(tab.route) == true ||
+            tab.route == "operations" && (destination?.route == "operations" || toolLinks.any { it.route == destination?.route })
+    }
     val showBottomBar = activeTab != null
 
     Scaffold(
-        topBar = { WorkspaceTopBar(user = user, onLogout = onLogout) },
+        topBar = { WorkspaceTopBar(user = user, showBack = destination?.route != activeTab?.route, onBack = { navController.popBackStack() }, onLogout = onLogout, onToggleTheme = onToggleTheme) },
         bottomBar = {
             if (showBottomBar && tabs.isNotEmpty()) {
                 NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
@@ -126,10 +139,28 @@ private fun AuthenticatedShell(user: UserDto, onLogout: () -> Unit) {
         },
         containerColor = MaterialTheme.colorScheme.background,
     ) { padding ->
-        NavHost(navController = navController, startDestination = start, modifier = Modifier.padding(padding)) {
-            composable("dashboard") { DashboardScreen(onOpenProperties = { navController.navigate("properties") }, onOpenOperations = { navController.navigate("operations") }) }
+        Box(Modifier.fillMaxSize().padding(padding)) {
+        NavHost(navController = navController, startDestination = start, modifier = Modifier.fillMaxSize()) {
+            composable("dashboard") {
+                DashboardScreen(
+                    onOpenProperties = { navController.navigate("properties") },
+                    onOpenProperty = { navController.navigate("property/$it") },
+                    onOpenOperations = { navController.navigate("operations") },
+                    onOpenResident = { navController.navigate("resident/$it") },
+                    onOpenResidents = { navController.navigate("residents") },
+                    onOpenRentResidents = { rentStatus -> navController.navigate("residents?rentStatus=$rentStatus") },
+                    onOpenPayments = { navController.navigate("payments") },
+                    onOpenUtilities = { navController.navigate("utilities") },
+                    onOpenReports = { report -> navController.navigate("reports?report=$report") },
+                    canRecordPayment = user.can("payments:write"),
+                    canAddUtility = user.can("utilities:write"),
+                )
+            }
             composable("properties") { PropertiesScreen(onOpenProperty = { navController.navigate("property/$it") }, canCreateProperty = user.role == "SUPER_ADMIN") }
-            composable("residents?propertyId={propertyId}", arguments = listOf(navArgument("propertyId") { type = NavType.StringType; nullable = true; defaultValue = null })) {
+            composable("residents?propertyId={propertyId}&rentStatus={rentStatus}", arguments = listOf(
+                navArgument("propertyId") { type = NavType.StringType; nullable = true; defaultValue = null },
+                navArgument("rentStatus") { type = NavType.StringType; nullable = true; defaultValue = null },
+            )) {
                 ResidentsScreen(
                     onOpenResident = { navController.navigate("resident/$it") },
                     canWrite = user.can("residents:write"),
@@ -154,7 +185,7 @@ private fun AuthenticatedShell(user: UserDto, onLogout: () -> Unit) {
                 )
             }
             composable("resident/{residentId}", arguments = listOf(navArgument("residentId") { type = NavType.StringType })) {
-                ResidentProfileScreen(canEdit = user.can("residents:write"), onEditResident = { navController.navigate("resident-edit/$it") })
+                ResidentProfileScreen(canEdit = user.can("residents:write"), canCheckout = user.can("residents:write"), canRefund = user.can("payments:write"), onEditResident = { navController.navigate("resident-edit/$it") })
             }
             composable("resident-create") {
                 ResidentFormScreen(
@@ -170,21 +201,29 @@ private fun AuthenticatedShell(user: UserDto, onLogout: () -> Unit) {
             }
             composable("operations") { OperationsHomeScreen(user, onOpen = { navController.navigate(it) }) }
             composable("utilities") { UtilitiesScreen() }
+            composable("rooms") { RoomsScreen(canWrite = user.can("rooms:write")) }
             composable("reminders") { RemindersScreen() }
+            composable("owner-reminders") { if (user.role == "SUPER_ADMIN") OwnerRemindersScreen(operationsViewModel) else EmptyMessage("Owner only", "Owner reminders are available to the super administrator.") }
             composable("deposits") { DepositsScreen() }
-            composable("reports") { ReportsScreen() }
+            composable("reports?report={report}", arguments = listOf(navArgument("report") { type = NavType.StringType; nullable = true; defaultValue = null })) { entry ->
+                ReportsScreen(initialReport = entry.arguments?.getString("report") ?: "occupancy")
+            }
             composable("settings") { SettingsScreen(canEdit = user.can("settings:write")) }
+            composable("staff") { if (user.can("staff:read")) StaffScreen() else EmptyMessage("No access", "Staff management is not assigned to this account.") }
             composable("no-access") { EmptyMessage("No modules assigned", "Ask your Aashray administrator to grant access to the workspace modules you need.") }
+        }
+        OwnerReminderAlarmHost(operationsViewModel, enabled = user.role == "SUPER_ADMIN")
         }
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun WorkspaceTopBar(user: UserDto, onLogout: () -> Unit) {
+private fun WorkspaceTopBar(user: UserDto, showBack: Boolean, onBack: () -> Unit, onLogout: () -> Unit, onToggleTheme: () -> Unit) {
     TopAppBar(
         title = {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                if (showBack) IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
                 Image(painterResource(R.drawable.aashray_original), contentDescription = "Aashray Group", contentScale = ContentScale.Crop, modifier = Modifier.width(112.dp).height(38.dp))
                 Spacer(Modifier.width(10.dp))
                 Column {
@@ -194,6 +233,9 @@ private fun WorkspaceTopBar(user: UserDto, onLogout: () -> Unit) {
             }
         },
         actions = {
+            IconButton(onClick = onToggleTheme) {
+                Icon(if (MaterialTheme.colorScheme.background.red < 0.4f) Icons.Default.LightMode else Icons.Default.DarkMode, contentDescription = "Toggle dark theme")
+            }
             IconButton(onClick = onLogout) { Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = "Sign out") }
         },
         colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),

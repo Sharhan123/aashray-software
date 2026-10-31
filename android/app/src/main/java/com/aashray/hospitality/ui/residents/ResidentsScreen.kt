@@ -10,7 +10,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -18,11 +22,13 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -34,6 +40,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.platform.LocalContext
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.aashray.hospitality.data.ResidentDto
@@ -45,6 +53,7 @@ import com.aashray.hospitality.ui.PageIntro
 import com.aashray.hospitality.ui.ResidentsViewModel
 import com.aashray.hospitality.ui.SectionTitle
 import com.aashray.hospitality.ui.money
+import com.aashray.hospitality.ui.finance.SelectionField
 
 @Composable
 fun ResidentsScreen(
@@ -58,10 +67,21 @@ fun ResidentsScreen(
     val search by viewModel.search.collectAsStateWithLifecycle()
     val selectedStatus by viewModel.status.collectAsStateWithLifecycle()
     val selectedRentStatus by viewModel.rentPaymentStatus.collectAsStateWithLifecycle()
+    val properties by viewModel.properties.collectAsStateWithLifecycle()
+    val rooms by viewModel.rooms.collectAsStateWithLifecycle()
+    val selectedProperty by viewModel.selectedPropertyId.collectAsStateWithLifecycle()
+    val selectedRoom by viewModel.selectedRoomId.collectAsStateWithLifecycle()
+    val selectedRoomType by viewModel.roomType.collectAsStateWithLifecycle()
+    val selectedOutstanding by viewModel.outstanding.collectAsStateWithLifecycle()
+    val selectedSort by viewModel.sort.collectAsStateWithLifecycle()
+    val selectedDirection by viewModel.direction.collectAsStateWithLifecycle()
+    val statusCounts by viewModel.statusCounts.collectAsStateWithLifecycle()
+    val importState by viewModel.importState.collectAsStateWithLifecycle()
     val loadingMore by viewModel.loadingMore.collectAsStateWithLifecycle()
     val loadMoreError by viewModel.loadMoreError.collectAsStateWithLifecycle()
     val reminders by viewModel.reminders.collectAsStateWithLifecycle()
     var pendingReminderId by remember { mutableStateOf<String?>(null) }
+    var showImport by remember { mutableStateOf(false) }
     val reminderLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         pendingReminderId?.let(viewModel::markReminderOpened)
         pendingReminderId = null
@@ -82,17 +102,51 @@ fun ResidentsScreen(
         }
         viewModel.consumePreparedReminder()
     }
+    if (showImport && canWrite) ResidentImportDialog(
+        state = importState,
+        onDismiss = { if (!importState.busy) { showImport = false; viewModel.clearImport() } },
+        onPreview = viewModel::previewImport,
+        onCommit = viewModel::commitImport,
+        onReset = viewModel::clearImport,
+        onImported = { viewModel.refresh(); viewModel.clearImport(); showImport = false },
+    )
     LazyColumn(Modifier.fillMaxWidth(), contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { PageIntro("Resident records", "Residents", "Search by name, resident ID, or mobile number.") }
+        item {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ResidentStatusCard("Active", statusCounts.active, selectedStatus == "ACTIVE", Modifier.weight(1f)) { viewModel.setStatus("ACTIVE") }
+                ResidentStatusCard("Notice", statusCounts.notice, selectedStatus == "NOTICE", Modifier.weight(1f)) { viewModel.setStatus("NOTICE") }
+                ResidentStatusCard("Checked out", statusCounts.checkedOut, selectedStatus == "INACTIVE", Modifier.weight(1f)) { viewModel.setStatus("INACTIVE") }
+            }
+        }
         reminders.error?.let { item { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) } }
-        if (canWrite) item { Button(onClick = onAddResident, modifier = Modifier.fillMaxWidth()) { Text("Add resident") } }
+        if (canWrite) item {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                androidx.compose.material3.OutlinedButton(onClick = { viewModel.clearImport(); showImport = true }, modifier = Modifier.weight(1f)) { Text("Import CSV", maxLines = 1) }
+                Button(onClick = onAddResident, modifier = Modifier.weight(1f)) { Text("Add resident", maxLines = 1) }
+            }
+        }
         item {
             OutlinedTextField(value = search, onValueChange = viewModel::setSearch, modifier = Modifier.fillMaxWidth(), label = { Text("Search residents") }, singleLine = true, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), shape = RoundedCornerShape(14.dp))
         }
         item {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf(null to "All", "ACTIVE" to "Active", "NOTICE" to "Notice", "INACTIVE" to "Inactive").forEach { (status, label) ->
-                    FilterChip(selected = selectedStatus == status, onClick = { viewModel.setStatus(status) }, label = { Text(label) })
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (properties.size > 1) SelectionField("Property", selectedProperty, listOf("" to "All properties") + properties.map { it._id to it.name }, viewModel::setProperty, "All properties")
+                if (rooms.isNotEmpty()) SelectionField("Room", selectedRoom, listOf("" to "All rooms") + rooms.map { it._id to "${it.propertyName ?: "Property"} · Room ${it.roomNumber} · ${it.roomType.replace('_', ' ')}" }, viewModel::setRoom, "All rooms")
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("" to "All room types", "AC" to "AC", "NON_AC" to "Non-AC").forEach { (type, label) ->
+                        FilterChip(selected = selectedRoomType == type, onClick = { viewModel.setRoomType(type) }, label = { Text(label) })
+                    }
+                }
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("" to "Any balance", "true" to "Has outstanding", "false" to "No outstanding").forEach { (value, label) ->
+                        FilterChip(selected = selectedOutstanding == value, onClick = { viewModel.setOutstanding(value) }, label = { Text(label) })
+                    }
+                }
+                SelectionField("Sort residents", selectedSort, listOf("createdAt" to "Recently added", "name" to "Name", "admissionDate" to "Admission date", "residentId" to "Resident ID"), viewModel::setSort)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    FilterChip(selected = selectedDirection == "asc", onClick = { viewModel.setDirection(if (selectedDirection == "asc") "desc" else "asc") }, label = { Text(if (selectedDirection == "asc") "A–Z / oldest" else "Z–A / newest") })
+                    androidx.compose.material3.OutlinedButton(onClick = viewModel::clearFilters) { Text("Clear filters") }
                 }
             }
         }
@@ -100,7 +154,7 @@ fun ResidentsScreen(
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("Current month rent · ${java.time.YearMonth.now().month.getDisplayName(java.time.format.TextStyle.SHORT, java.util.Locale.ENGLISH)} ${java.time.YearMonth.now().year}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(null to "All rent", "PAID" to "Paid", "OVERDUE" to "Overdue").forEach { (status, label) ->
+                    listOf(null to "All rent", "PAID" to "Paid", "DUE_GRACE" to "Due in grace", "OVERDUE" to "Overdue").forEach { (status, label) ->
                         FilterChip(selected = selectedRentStatus == status, onClick = { viewModel.setRentPaymentStatus(status) }, label = { Text(label) })
                     }
                 }
@@ -139,6 +193,82 @@ fun ResidentsScreen(
 }
 
 @Composable
+private fun ResidentImportDialog(
+    state: com.aashray.hospitality.ui.ResidentImportState,
+    onDismiss: () -> Unit,
+    onPreview: (String) -> Unit,
+    onCommit: () -> Unit,
+    onReset: () -> Unit,
+    onImported: () -> Unit,
+) {
+    val context = LocalContext.current
+    var csv by remember { mutableStateOf(state.csv) }
+    val template = "fullName,gender,mobile,email,emergencyContact,governmentId,admissionDate,billingStartDate,roomNumber,bedId,monthlyRent,dueDay,securityDeposit,depositPaid,depositMethod,notes\r\nExample Resident,MALE,+919876543210,,,,2026-10-01,2026-10-01,101,1,8500,5,10000,0,CASH,"
+    val openCsv = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri ?: return@rememberLauncherForActivityResult
+        runCatching { context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } }
+            .onSuccess { content -> csv = content.orEmpty() }
+            .onFailure { csv = "" }
+    }
+    val createTemplate = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri ->
+        if (uri != null) runCatching { context.contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(template) } }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+        title = { Text("Import residents") },
+        text = {
+            Column(Modifier.fillMaxWidth().heightIn(max = 620.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Choose a CSV or paste its contents. Preview checks every row before any resident or charge is created.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    androidx.compose.material3.OutlinedButton(onClick = { createTemplate.launch("aashray-resident-import-template.csv") }, modifier = Modifier.weight(1f)) { Text("Download template") }
+                    androidx.compose.material3.OutlinedButton(onClick = { openCsv.launch(arrayOf("text/*", "application/csv", "application/vnd.ms-excel")) }, modifier = Modifier.weight(1f)) { Text("Choose CSV") }
+                }
+                OutlinedTextField(csv, { csv = it; onReset() }, Modifier.fillMaxWidth(), label = { Text("CSV contents") }, minLines = 5, maxLines = 8)
+                if (state.error != null) Text(state.error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                state.result?.let { result ->
+                    Text("Import complete · ${result.inserted} added · ${result.skipped} skipped · ${result.failed} failed", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                    result.errors.take(10).forEach { Text("Row ${it.row}: ${it.message}", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall) }
+                }
+                state.preview?.let { preview ->
+                    Text("${preview.validCount} valid · ${preview.errorCount} row errors", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    preview.rows.take(20).forEach { row ->
+                        Text("Row ${row.row} · ${row.fullName} · ${row.mobile} · ${row.roomId}/${row.bedId} · ${money((row.monthlyRent * 100).toLong())}", style = MaterialTheme.typography.bodySmall)
+                    }
+                    preview.errors.take(20).forEach { error -> Text("Row ${error.row}: ${error.message}", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall) }
+                    if (preview.rows.size > 20 || preview.errors.size > 20) Text("Showing the first 20 valid rows and errors.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        },
+        confirmButton = {
+            when {
+                state.result != null -> Button(onClick = onImported) { Text("Done") }
+                state.preview != null -> Button(onClick = onCommit, enabled = !state.busy && state.preview.validCount > 0) { Text("Import ${state.preview.validCount} rows") }
+                else -> Button(onClick = { onPreview(csv) }, enabled = !state.busy && csv.isNotBlank()) {
+                    if (state.busy) androidx.compose.material3.CircularProgressIndicator(Modifier.padding(end = 8.dp), strokeWidth = 2.dp)
+                    Text("Preview CSV")
+                }
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss, enabled = !state.busy) { Text("Close") } },
+    )
+}
+
+@Composable
+private fun ResidentStatusCard(label: String, count: Int, selected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    Card(
+        modifier = modifier.clickable(onClick = onClick),
+        colors = CardDefaults.cardColors(containerColor = if (selected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(14.dp),
+    ) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+            Text(count.toString(), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
+@Composable
 private fun ResidentCard(
     resident: ResidentDto,
     onClick: () -> Unit,
@@ -164,6 +294,7 @@ private fun ResidentCard(
                 }
             }
             Text(resident.mobile, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (resident.gender.isNotBlank()) Text("${resident.gender.lowercase().replaceFirstChar { it.uppercase() }} resident", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 ResidentStat("Room", resident.currentAllocation?.roomId?.roomNumber ?: resident.currentAllocation?.roomNumber ?: "—", Modifier.weight(1f))
                 ResidentStat("Bed", resident.currentAllocation?.bedId ?: "—", Modifier.weight(1f))
@@ -172,6 +303,14 @@ private fun ResidentCard(
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text("Outstanding", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text(money(resident.outstandingPaise), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+            }
+            resident.rentSummary?.let { rent ->
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Surface(color = when (rent.status) { "OVERDUE" -> MaterialTheme.colorScheme.errorContainer; "DUE_GRACE" -> MaterialTheme.colorScheme.tertiaryContainer; else -> MaterialTheme.colorScheme.primaryContainer }, shape = RoundedCornerShape(18.dp)) {
+                        Text(rent.status.replace('_', ' '), Modifier.padding(horizontal = 10.dp, vertical = 6.dp), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    }
+                    Text("Due ${rent.dueAt?.take(10) ?: "—"}${if (rent.daysPastDue > 0) " · ${rent.daysPastDue}d past due" else ""}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
             }
             if (canSendReminder) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {

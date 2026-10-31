@@ -17,6 +17,10 @@ val configuredApiBaseUrl = providers.gradleProperty("API_BASE_URL")
     .orElse("https://aashray-hospitality-api.onrender.com/api/")
     .get()
 require(configuredApiBaseUrl.startsWith("https://", ignoreCase = true)) { "API_BASE_URL must use HTTPS." }
+val configuredWebAppUrl = providers.gradleProperty("WEB_APP_URL")
+    .orElse("https://aashray-software.vercel.app/")
+    .get()
+require(configuredWebAppUrl.startsWith("https://", ignoreCase = true)) { "WEB_APP_URL must use HTTPS." }
 
 android {
     namespace = "com.aashray.hospitality"
@@ -29,6 +33,7 @@ android {
         versionCode = 1
         versionName = "1.0.0"
         buildConfigField("String", "API_BASE_URL", "\"$configuredApiBaseUrl\"")
+        buildConfigField("String", "WEB_APP_URL", "\"$configuredWebAppUrl\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
