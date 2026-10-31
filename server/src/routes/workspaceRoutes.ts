@@ -19,12 +19,13 @@ import { AuditEvent } from '../models/AuditEvent.js';
 import { OwnerReminder } from '../models/OwnerReminder.js';
 import { requireAuth, requirePermission, requireRole } from '../middleware/auth.js';
 import { chargeBalance, chargeLedger, rentChargeLedger } from '../services/financialCalculations.js';
-import { periodKeyFor } from '../services/billingRules.js';
+import { billingStartDateForPeriod, periodKeyFor } from '../services/billingRules.js';
 import { businessMonthRange, rentChargeMongoFilter, summarizeRentCharges } from '../services/rentStatus.js';
 import { residentIsInScope, scopedResidentIds, scopedRoomIds } from '../middleware/propertyAccess.js';
 
 const router = Router(); router.use(requireAuth);
-const defaultRentReminderTemplate = 'Hello {residentName}, there is a rent due of {amount} from Aashray Paying Guest for {month}. Please pay it within 5 days of the due date ({dueDate}). Thank you.';
+const legacyRentReminderTemplate = 'Hello {residentName}, there is a rent due of {amount} from Aashray Paying Guest for {month}. Please pay it within 5 days of the due date ({dueDate}). Thank you.';
+const defaultRentReminderTemplate = 'Dear {residentName}, 😊\n\nThis is a gentle reminder that rent of {amount} for the period {periodStart} to {periodEnd} is due on {dueDate}. Kindly clear your dues at the earliest.\n\n📌 Important Notes:\n• Rent must be paid within 5 days of the due date. Late charges of ₹50 per day apply from {lateFeeStart}.\n• 30 days’ prior notice is mandatory before vacating.\n\nPlease ignore this message if you have already paid.\n\nThank you for your cooperation! 🙏\n– Aashray Paying Guest';
 const safeUser = (user: { id?: string; name: string; email: string; role: string; active: boolean; permissions: string[]; propertyIds?: unknown[]; lastLoginAt?: Date | null; createdAt?: Date }) => ({ id: user.id, name: user.name, email: user.email, role: user.role, active: user.active, permissions: user.permissions, propertyIds: (user.propertyIds ?? []).map(String), lastLoginAt: user.lastLoginAt, createdAt: user.createdAt });
 
 router.get('/dashboard', requirePermission('dashboard:read'), asyncHandler(async (req, res) => {
@@ -292,7 +293,23 @@ router.post('/messages/prepare', requirePermission('messages:send'), asyncHandle
     if (!charges.length) return res.status(422).json({ error: onlyOverdue ? 'There are no overdue unpaid charges of this type for this resident.' : 'There are no unpaid charges of this type to remind this resident about.' });
     const balance = charges.reduce((sum, c) => sum + chargeBalance(c), 0);
     const amount = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(balance / 100);
-    const due = charges[0]?.dueAt ? new Intl.DateTimeFormat('en-IN', { dateStyle: 'medium', timeZone: 'Asia/Kolkata' }).format(charges[0].dueAt) : 'your upcoming due date';
+    const formatReminderDate = (date: Date) => new Intl.DateTimeFormat('en-IN', { dateStyle: 'long', timeZone: 'Asia/Kolkata' }).format(date);
+    const due = charges[0]?.dueAt ? formatReminderDate(charges[0].dueAt) : 'your upcoming due date';
+    const rentPeriodKeys = [...new Set(charges.map((charge) => charge.periodKey).filter((key): key is string => Boolean(key && /^\d{4}-\d{2}$/.test(key))))].sort();
+    const periodStart = rentPeriodKeys.length
+      ? formatReminderDate(billingStartDateForPeriod(rentPeriodKeys[0]!, resident.dueDay))
+      : 'the current billing period';
+    const lastPeriodKey = rentPeriodKeys.at(-1);
+    let periodEnd = 'the end of the billing period';
+    if (lastPeriodKey) {
+      const [year, month] = lastPeriodKey.split('-').map(Number);
+      const nextPeriodKey = `${month === 12 ? year + 1 : year}-${String(month === 12 ? 1 : month + 1).padStart(2, '0')}`;
+      const end = billingStartDateForPeriod(nextPeriodKey, resident.dueDay);
+      end.setUTCDate(end.getUTCDate() - 1);
+      periodEnd = formatReminderDate(end);
+    }
+    const lateFeeDate = charges[0]?.dueAt ? new Date(charges[0].dueAt) : null;
+    if (lateFeeDate) lateFeeDate.setUTCDate(lateFeeDate.getUTCDate() + 6);
     const periods = [...new Set(charges.map((charge) => charge.periodKey).filter(Boolean))];
     const period = data.messageType === 'UTILITY'
       ? [...new Set(charges.map((charge) => charge.servicePeriodStart && charge.servicePeriodEnd
@@ -306,9 +323,10 @@ router.post('/messages/prepare', requirePermission('messages:send'), asyncHandle
     }).join(', ');
     if (data.messageType === 'OVERDUE' || data.messageType === 'RENT_REMINDER') {
       const settings = await AppSettings.findOne({ key: 'main' }).lean();
-      const template = settings?.rentReminderTemplate?.trim() || defaultRentReminderTemplate;
-      const values: Record<string, string> = { residentName: resident.fullName, amount, month: period || 'the current billing period', dueDate: due, property: propertyName };
-      message = template.replace(/\{(residentName|amount|month|dueDate|property)\}/g, (_token, key: string) => values[key] ?? '');
+      const savedTemplate = settings?.rentReminderTemplate?.trim();
+      const template = !savedTemplate || savedTemplate === legacyRentReminderTemplate ? defaultRentReminderTemplate : savedTemplate;
+      const values: Record<string, string> = { residentName: resident.fullName, amount, month: period || 'the current billing period', dueDate: due, periodStart, periodEnd, lateFeeStart: lateFeeDate ? formatReminderDate(lateFeeDate) : 'the sixth day after the due date', property: propertyName };
+      message = template.replace(/\{(residentName|amount|month|dueDate|periodStart|periodEnd|lateFeeStart|property)\}/g, (_token, key: string) => values[key] ?? '');
     } else {
       message = `Hello ${resident.fullName}, your pending utility balance at ${propertyName} is ${amount}${period ? ` for ${period}` : ''}, due ${due}. Please clear the amount within 5 days. If you have already paid, please ignore this reminder. Thank you.`;
     }
