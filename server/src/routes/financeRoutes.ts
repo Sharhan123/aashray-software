@@ -22,6 +22,7 @@ import { resolveUtilityPeriod, utilityPeriodDescription, utilityPeriodMonthKeys,
 
 const router = Router(); router.use(requireAuth);
 const id = z.string().regex(/^[a-f\d]{24}$/i); const day = z.coerce.date();
+const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 function rangeDate(value: unknown, upperBoundary = false) {
   const text = String(value); const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
   if (match) return upperBoundary
@@ -61,6 +62,14 @@ router.get('/charges', requirePermission('billing:read'), asyncHandler(async (re
   else if (req.query.status === 'PENDING') filter.$expr = { $and: [{ $gte: ['$dueAt', now] }, { $eq: [{ $add: ['$paidPaise', { $ifNull: ['$externalPaidPaise', 0] }] }, 0] }] };
   else if (req.query.status === 'PARTIAL') filter.$expr = { $and: [{ $gte: ['$dueAt', now] }, { $gt: [{ $add: ['$paidPaise', { $ifNull: ['$externalPaidPaise', 0] }] }, 0] }, { $lt: [{ $add: ['$paidPaise', { $ifNull: ['$externalPaidPaise', 0] }] }, '$amountPaise'] }] };
   else if (req.query.status === 'PAID') filter.$expr = { $gte: [{ $add: ['$paidPaise', { $ifNull: ['$externalPaidPaise', 0] }] }, '$amountPaise'] };
+  if (req.query.outstanding === 'true') {
+    const balanceExpr = { $lt: [{ $add: ['$paidPaise', { $ifNull: ['$externalPaidPaise', 0] }] }, '$amountPaise'] };
+    const conditions = Array.isArray(filter.$and) ? filter.$and as Record<string, unknown>[] : [];
+    if (filter.$expr) conditions.push({ $expr: filter.$expr });
+    conditions.push({ $expr: balanceExpr });
+    filter.$and = conditions;
+    delete filter.$expr;
+  }
   if (req.query.from || req.query.to) filter.dueAt = { ...(req.query.from ? { $gte: rangeDate(req.query.from) } : {}), ...(req.query.to ? { $lte: rangeDate(req.query.to, true) } : {}) };
   if (req.query.format === 'csv') {
     const rows = await Charge.find(filter).populate('residentId', 'residentId fullName').sort({ dueAt: -1 }).limit(10000).lean();
@@ -193,12 +202,14 @@ router.get('/payments', requirePermission('payments:read'), asyncHandler(async (
 
 router.get('/payment-ledger/:kind', requirePermission('payments:read'), asyncHandler(async (req, res) => {
   const kind = z.enum(['all', 'rent', 'utilities', 'deposits']).parse(req.params.kind);
-  const range = z.object({ from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() }).refine((value) => !value.from || !value.to || value.from <= value.to, { message: 'The end date must be on or after the start date.' }).parse(req.query);
+  const range = z.object({ from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), search: z.string().trim().max(120).optional() }).refine((value) => !value.from || !value.to || value.from <= value.to, { message: 'The end date must be on or after the start date.' }).parse(req.query);
   const dateFilter = (field: 'paymentDate' | 'createdAt') => range.from || range.to ? { [field]: { ...(range.from ? { $gte: rangeDate(range.from) } : {}), ...(range.to ? { $lte: rangeDate(range.to, true) } : {}) } } : {};
   const requestedPropertyId = req.query.propertyId && id.safeParse(req.query.propertyId).success ? String(req.query.propertyId) : undefined;
   const scope = await scopedResidentIds(req, requestedPropertyId);
   if (scope.forbidden) return res.status(403).json({ error: 'You do not have access to this property.' });
-  const residentFilter = scope.ids === null ? {} : { residentId: { $in: scope.ids } };
+  const matchingResidentIds = range.search ? await Resident.find({ ...(scope.ids === null ? {} : { _id: { $in: scope.ids } }), $or: [{ fullName: { $regex: escapeRegex(range.search), $options: 'i' } }, { residentId: { $regex: escapeRegex(range.search), $options: 'i' } }] }).distinct('_id') : scope.ids;
+  if (matchingResidentIds && matchingResidentIds.length === 0) return res.json({ rows: [] });
+  const residentFilter = matchingResidentIds === null ? {} : { residentId: { $in: matchingResidentIds } };
 
   if (kind === 'all') {
     const [payments, deposits] = await Promise.all([
@@ -320,7 +331,7 @@ router.get('/payments/:id/receipt', requirePermission('payments:read'), asyncHan
   if (!await residentIsInScope(req, String((payment.residentId as unknown as { _id: Types.ObjectId })._id))) return res.status(403).json({ error: 'You do not have access to this resident’s property.' });
   const [allocation, charges] = await Promise.all([
     RoomAllocation.findOne({ residentId: (payment.residentId as unknown as { _id: Types.ObjectId })._id, startDate: { $lte: payment.paymentDate }, $or: [{ endDate: null }, { endDate: { $gte: payment.paymentDate } }] }).sort({ startDate: -1 }).populate({ path: 'roomId', select: 'roomNumber propertyId propertyName', populate: { path: 'propertyId', select: 'name address' } }).lean(),
-    Charge.find({ _id: { $in: payment.allocations.map((item) => item.chargeId) } }).select('kind utilityType periodKey servicePeriodStart servicePeriodEnd description amountPaise').lean(),
+    Charge.find({ _id: { $in: payment.allocations.map((item) => item.chargeId) } }).select('kind utilityType periodKey servicePeriodStart servicePeriodEnd dueAt description amountPaise').lean(),
   ]);
   const chargeMap = new Map(charges.map((charge) => [String(charge._id), charge]));
   const receiptNumber = `ASH-${payment.paymentDate.getUTCFullYear()}-${String(payment._id).toUpperCase()}`;

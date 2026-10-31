@@ -17,12 +17,12 @@ import { ResidentTransferHistory } from '../models/ResidentTransferHistory.js';
 import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { residentIsInScope, scopedResidentIds, scopedRoomIds } from '../middleware/propertyAccess.js';
 import { inTransaction } from '../services/transactions.js';
-import { admissionBillingStartDate, billingDayForDate, billingStartDateForPeriod, chargeStatus, dueDateForPeriod, paiseFromRupees, periodKeyFor } from '../services/billingRules.js';
+import { billingCycleStartDate, billingDayForDate, chargeStatus, dueDateForPeriod, paiseFromRupees, periodKeyFor, rentCycleStartPeriodFor } from '../services/billingRules.js';
 import { resolveUtilityPeriod, utilityPeriodDescription, utilityPeriodMonthKeys, utilityPeriodSchema } from '../services/utilityPeriod.js';
 import { admitResident } from '../services/admissionService.js';
 import { chargeLedger, residentFinancialSummary, rentChargeLedger } from '../services/financialCalculations.js';
 import { migrationOpeningPosition } from '../services/migrationAccounting.js';
-import { rentChargeMongoFilter, summarizeRentCharges } from '../services/rentStatus.js';
+import { summarizeRentCharges } from '../services/rentStatus.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -130,22 +130,6 @@ router.get('/residents', requirePermission('residents:read'), asyncHandler(async
     const aggregates = await Charge.aggregate([{ $group: { _id: '$residentId', balance: { $sum: { $max: [0, { $subtract: ['$amountPaise', { $add: ['$paidPaise', { $ifNull: ['$externalPaidPaise', 0] }] }] }] } } } }, { $match: { balance: { $gt: 0 } } }]);
     const outstandingIds = aggregates.map((x) => x._id); if (req.query.outstanding === 'false') { const hasBalance = new Set(outstandingIds.map((id) => String(id))); const all = await Resident.distinct('_id', filter); filter._id = { $in: all.filter((id) => !hasBalance.has(String(id))) }; } else { const existingIds = (filter._id as { $in?: unknown[] } | undefined)?.$in; const existingSet = existingIds ? new Set(existingIds.map(String)) : null; filter._id = { $in: outstandingIds.filter((id) => !existingSet || existingSet.has(String(id))) }; }
   }
-  const rentPaymentStatus = String(req.query.rentStatus ?? req.query.rentPaymentStatus ?? '');
-  const rentStatus = rentPaymentStatus === 'PAID' ? 'CLEARED' : rentPaymentStatus;
-  const requestedPeriod = String(req.query.rentPeriod ?? periodKeyFor(new Date()));
-  const rentPeriod = requestedPeriod === 'all' || /^\d{4}-(0[1-9]|1[0-2])$/.test(requestedPeriod) ? requestedPeriod : periodKeyFor(new Date());
-  if (['CLEARED', 'OVERDUE', 'DUE_GRACE', 'UPCOMING', 'NO_BILL'].includes(rentStatus)) {
-    const rentFilter: Record<string, unknown> = { kind: 'RENT', ...(rentPeriod === 'all' ? {} : { periodKey: rentPeriod }) };
-    if (rentStatus === 'NO_BILL') {
-      const billedIds = new Set((await Charge.distinct('residentId', { kind: 'RENT', ...(rentPeriod === 'all' ? {} : { periodKey: rentPeriod }) })).map(String));
-      const candidates = await Resident.distinct('_id', filter);
-      filter._id = { $in: candidates.filter((residentId) => !billedIds.has(String(residentId))) };
-    }
-    const matchingIds = rentStatus === 'NO_BILL' ? [] : await Charge.distinct('residentId', { ...rentFilter, ...rentChargeMongoFilter(rentStatus as 'CLEARED' | 'OVERDUE' | 'DUE_GRACE' | 'UPCOMING') });
-    const existingIds = (filter._id as { $in?: unknown[] } | undefined)?.$in;
-    const existingSet = existingIds ? new Set(existingIds.map(String)) : null;
-    if (rentStatus !== 'NO_BILL') filter._id = { $in: matchingIds.filter((id) => !existingSet || existingSet.has(String(id))) };
-  }
   const residentScope = await scopedResidentIds(req, req.query.propertyId && objectId.safeParse(req.query.propertyId).success ? String(req.query.propertyId) : undefined);
   if (residentScope.forbidden) return res.status(403).json({ error: 'You do not have access to this property.' });
   if (residentScope.ids !== null) {
@@ -153,10 +137,44 @@ router.get('/residents', requirePermission('residents:read'), asyncHandler(async
     const allowedIds = new Set(residentScope.ids.map(String));
     filter._id = { $in: currentIds ? currentIds.filter((id) => allowedIds.has(String(id))) : residentScope.ids };
   }
+  const rentPaymentStatus = String(req.query.rentStatus ?? req.query.rentPaymentStatus ?? '');
+  const rentStatus = rentPaymentStatus === 'PAID' ? 'CLEARED' : rentPaymentStatus;
+  const hasExplicitRentPeriod = req.query.rentPeriod !== undefined;
+  const requestedPeriod = String(req.query.rentPeriod ?? '');
+  const rentPeriod = requestedPeriod === 'all' || /^\d{4}-(0[1-9]|1[0-2])$/.test(requestedPeriod) ? requestedPeriod : '';
+  const cyclePeriodByResident = new Map<string, string>();
+  if (!hasExplicitRentPeriod) {
+    // A resident's active rent period follows their due-day anniversary, not
+    // the first day of the calendar month. This keeps Oct 26–Nov 26 cycles
+    // visible as the same current cycle when November begins.
+    const cycleResidents = await Resident.find(filter).select('_id admissionDate rentSchedules').lean();
+    const now = new Date();
+    for (const resident of cycleResidents) {
+      const schedule = [...resident.rentSchedules].filter((entry) => entry.effectiveFrom <= now).sort((a, b) => b.effectiveFrom.getTime() - a.effectiveFrom.getTime())[0];
+      const dueDay = schedule?.dueDay ?? billingDayForDate(resident.admissionDate);
+      cyclePeriodByResident.set(String(resident._id), rentCycleStartPeriodFor(now, dueDay));
+    }
+  }
+  const periodChargeQuery = (residentIds: unknown[]) => {
+    if (hasExplicitRentPeriod) return { residentId: { $in: residentIds }, kind: 'RENT', ...(rentPeriod === 'all' ? {} : { periodKey: rentPeriod || periodKeyFor(new Date()) }) };
+    return { kind: 'RENT', $or: residentIds.map((residentId) => ({ residentId, periodKey: cyclePeriodByResident.get(String(residentId)) ?? periodKeyFor(new Date()) })) };
+  };
+  if (['CLEARED', 'OVERDUE', 'DUE_GRACE', 'UPCOMING', 'NO_BILL'].includes(rentStatus)) {
+    const candidates = await Resident.find(filter).select('_id').lean();
+    const candidateIds = candidates.map((resident) => resident._id);
+    const cycleCharges = candidateIds.length ? await Charge.find(periodChargeQuery(candidateIds)).lean() : [];
+    const chargesByResident = new Map<string, typeof cycleCharges>();
+    for (const charge of cycleCharges) chargesByResident.set(String(charge.residentId), [...(chargesByResident.get(String(charge.residentId)) ?? []), charge]);
+    const matchingIds = candidates.filter((resident) => {
+      const summary = summarizeRentCharges(chargesByResident.get(String(resident._id)) ?? []);
+      return summary.status === rentStatus;
+    }).map((resident) => resident._id);
+    filter._id = { $in: matchingIds };
+  }
   const sortKey = String(req.query.sort ?? 'createdAt'); const sortField = ({ name: 'fullName', admissionDate: 'admissionDate', residentId: 'residentId', createdAt: 'createdAt' } as Record<string, string>)[sortKey] ?? 'createdAt'; const direction = req.query.direction === 'asc' ? 1 : -1;
   const [residents, total] = await Promise.all([Resident.find(filter).sort({ [sortField]: direction }).skip((page - 1) * limit).limit(limit).lean(), Resident.countDocuments(filter)]);
   const ids = residents.map((r) => r._id);
-  const [allocations, historicalAllocations, charges, periodCharges] = await Promise.all([RoomAllocation.find({ residentId: { $in: ids }, active: true }).populate({ path: 'roomId', select: 'roomNumber roomType propertyId propertyName' }).lean(), RoomAllocation.find({ residentId: { $in: ids } }).populate({ path: 'roomId', select: 'roomNumber roomType propertyId propertyName' }).sort({ startDate: -1 }).lean(), Charge.aggregate([{ $match: { residentId: { $in: ids } } }, { $group: { _id: '$residentId', outstandingPaise: { $sum: { $max: [0, { $subtract: ['$amountPaise', { $add: ['$paidPaise', { $ifNull: ['$externalPaidPaise', 0] }] }] }] } } } }]), Charge.find({ residentId: { $in: ids }, kind: 'RENT', ...(rentPeriod === 'all' ? {} : { periodKey: rentPeriod }) }).sort({ dueAt: 1 }).lean()]);
+  const [allocations, historicalAllocations, charges, periodCharges] = await Promise.all([RoomAllocation.find({ residentId: { $in: ids }, active: true }).populate({ path: 'roomId', select: 'roomNumber roomType propertyId propertyName' }).lean(), RoomAllocation.find({ residentId: { $in: ids } }).populate({ path: 'roomId', select: 'roomNumber roomType propertyId propertyName' }).sort({ startDate: -1 }).lean(), Charge.aggregate([{ $match: { residentId: { $in: ids } } }, { $group: { _id: '$residentId', outstandingPaise: { $sum: { $max: [0, { $subtract: ['$amountPaise', { $add: ['$paidPaise', { $ifNull: ['$externalPaidPaise', 0] }] }] }] } } } }]), ids.length ? Charge.find(periodChargeQuery(ids)).sort({ dueAt: 1 }).lean() : []]);
   const allocMap = new Map(allocations.map((a) => [String(a.residentId), a])); const balanceMap = new Map(charges.map((c) => [String(c._id), c.outstandingPaise]));
   const lastAllocMap = new Map<string, (typeof historicalAllocations)[number]>();
   for (const allocation of historicalAllocations) if (!lastAllocMap.has(String(allocation.residentId))) lastAllocMap.set(String(allocation.residentId), allocation);
@@ -165,7 +183,9 @@ router.get('/residents', requirePermission('residents:read'), asyncHandler(async
   const now = new Date();
   return res.json({ residents: residents.map((r) => {
     const residentCharges = periodChargeMap.get(String(r._id)) ?? [];
-    return { ...r, currentAllocation: allocMap.get(String(r._id)) ?? lastAllocMap.get(String(r._id)) ?? null, outstandingPaise: balanceMap.get(String(r._id)) ?? 0, currentRentPaise: [...r.rentSchedules].sort((a, b) => b.effectiveFrom.getTime() - a.effectiveFrom.getTime())[0]?.monthlyRentPaise ?? 0, rentSummary: summarizeRentCharges(residentCharges, now), rentPeriod };
+    const residentRentPeriod = hasExplicitRentPeriod ? rentPeriod || periodKeyFor(now) : cyclePeriodByResident.get(String(r._id)) ?? periodKeyFor(now);
+    const currentSchedule = [...r.rentSchedules].filter((entry) => entry.effectiveFrom <= now).sort((a, b) => b.effectiveFrom.getTime() - a.effectiveFrom.getTime())[0];
+    return { ...r, currentAllocation: allocMap.get(String(r._id)) ?? lastAllocMap.get(String(r._id)) ?? null, outstandingPaise: balanceMap.get(String(r._id)) ?? 0, currentRentPaise: currentSchedule?.monthlyRentPaise ?? 0, rentSummary: summarizeRentCharges(residentCharges, now), rentPeriod: residentRentPeriod };
   }), page, limit, total, pages: Math.ceil(total / limit) });
 }));
 
@@ -263,7 +283,9 @@ router.get('/residents/:id', requirePermission('residents:read'), asyncHandler(a
     return { ...checkout, settlementDuePaise, settlementStatus, linkedRefunds, refundedToDatePaise: checkout.refundedPaise + postCheckoutRefundedPaise, refundableRemainingPaise: Math.max(0, checkout.depositRetainedPaise - postCheckoutRefundedPaise) };
   });
   const summary = residentFinancialSummary(charges);
-  const currentRentSummary = summarizeRentCharges(charges.filter((charge) => charge.kind === 'RENT' && charge.periodKey === periodKeyFor(new Date())));
+  const currentSchedule = [...resident.rentSchedules].filter((entry) => entry.effectiveFrom <= new Date()).sort((a, b) => b.effectiveFrom.getTime() - a.effectiveFrom.getTime())[0];
+  const currentCycle = rentCycleStartPeriodFor(new Date(), currentSchedule?.dueDay ?? billingDayForDate(resident.admissionDate));
+  const currentRentSummary = summarizeRentCharges(charges.filter((charge) => charge.kind === 'RENT' && charge.periodKey === currentCycle));
   return res.json({ resident, migration, allocations, transfers, charges: ledger, payments: payments.map((payment) => ({ ...payment, allocatedPaise: payment.reversedAt ? 0 : payment.allocations.reduce((sum, allocation) => sum + allocation.amountPaise, 0), unallocatedPaise: payment.reversedAt ? 0 : payment.amountPaise - payment.allocations.reduce((sum, allocation) => sum + allocation.amountPaise, 0) })), deposits, messages, audit, checkouts: checkoutSummaries, outstandingPaise: summary.outstandingPaise, overduePaise: summary.overdueRentPaise, rentOutstandingPaise: summary.rentOutstandingPaise, openingBalanceOutstandingPaise: summary.openingBalanceOutstandingPaise, rentSummary: currentRentSummary, pendingUtilityPaise: summary.pendingUtilityPaise, depositBalancePaise: deposits.reduce((sum, deposit) => sum + (deposit.kind === 'RECEIVED' ? deposit.amountPaise : ['REFUNDED', 'APPLIED'].includes(deposit.kind) ? -deposit.amountPaise : 0), 0) });
 }));
 
@@ -358,7 +380,7 @@ router.post('/residents/:id/migration-preview', requirePermission('billing:write
   const data = migrationInput.parse(req.body); const resident = await Resident.findById(req.params.id).lean();
   if (!resident) return res.status(404).json({ error: 'Resident not found.' });
   if (!await residentIsInScope(req, String(resident._id))) return res.status(403).json({ error: 'You do not have access to this residentâ€™s property.' });
-  const goLiveDate = data.goLiveDate; const periodKey = periodKeyFor(goLiveDate); const rentPaise = paiseFromRupees(data.monthlyRent, true);
+  const goLiveDate = data.goLiveDate; const periodKey = rentCycleStartPeriodFor(goLiveDate, data.dueDay); const rentPaise = paiseFromRupees(data.monthlyRent, true);
   const existingMigration = await ResidentMigration.findOne({ residentId: resident._id }).lean();
   const [existingCharge, existingDepositTransactions, currentCharges] = await Promise.all([
     Charge.findOne({ residentId: resident._id, kind: 'RENT', periodKey }).lean(),
@@ -367,14 +389,14 @@ router.post('/residents/:id/migration-preview', requirePermission('billing:write
   ]);
   const depositLedgerPaise = existingDepositTransactions.reduce((sum, item) => sum + (item.kind === 'RECEIVED' ? item.amountPaise : ['REFUNDED', 'APPLIED'].includes(item.kind) ? -item.amountPaise : 0), 0);
   const openingPosition = migrationOpeningPosition(paiseFromRupees(data.openingArrears, true), paiseFromRupees(data.prepaidRent, true));
-  return res.json({ preview: { resident: { id: String(resident._id), residentId: resident.residentId, fullName: resident.fullName, admissionDate: resident.admissionDate, billingStartDate: resident.billingStartDate }, goLiveDate, periodKey, monthlyRentPaise: rentPaise, dueDay: billingDayForDate(resident.admissionDate), ...openingPosition, currentPeriodSettledPaise: paiseFromRupees(data.currentPeriodSettled, true), securityDepositHeldPaise: paiseFromRupees(data.securityDepositHeld, true), projectedOpeningNetPaise: openingPosition.openingBalancePaise, existingMigration: Boolean(existingMigration), existingPeriodCharge: existingCharge ? { id: String(existingCharge._id), amountPaise: existingCharge.amountPaise, paidPaise: existingCharge.paidPaise, kind: existingCharge.kind } : null, depositLedgerPaise, depositMatches: !existingDepositTransactions.length || depositLedgerPaise === paiseFromRupees(data.securityDepositHeld, true), depositWillBeRecorded: !existingDepositTransactions.length && paiseFromRupees(data.securityDepositHeld, true) > 0, recentCharges: currentCharges.map((charge) => ({ id: String(charge._id), kind: charge.kind, periodKey: charge.periodKey, amountPaise: charge.amountPaise, paidPaise: charge.paidPaise, description: charge.description })) } });
+  return res.json({ preview: { resident: { id: String(resident._id), residentId: resident.residentId, fullName: resident.fullName, admissionDate: resident.admissionDate, billingStartDate: resident.billingStartDate }, goLiveDate, periodKey, monthlyRentPaise: rentPaise, dueDay: data.dueDay, ...openingPosition, currentPeriodSettledPaise: paiseFromRupees(data.currentPeriodSettled, true), securityDepositHeldPaise: paiseFromRupees(data.securityDepositHeld, true), projectedOpeningNetPaise: openingPosition.openingBalancePaise, existingMigration: Boolean(existingMigration), existingPeriodCharge: existingCharge ? { id: String(existingCharge._id), amountPaise: existingCharge.amountPaise, paidPaise: existingCharge.paidPaise, kind: existingCharge.kind } : null, depositLedgerPaise, depositMatches: !existingDepositTransactions.length || depositLedgerPaise === paiseFromRupees(data.securityDepositHeld, true), depositWillBeRecorded: !existingDepositTransactions.length && paiseFromRupees(data.securityDepositHeld, true) > 0, recentCharges: currentCharges.map((charge) => ({ id: String(charge._id), kind: charge.kind, periodKey: charge.periodKey, amountPaise: charge.amountPaise, paidPaise: charge.paidPaise, description: charge.description })) } });
 }));
 
 router.post('/residents/:id/migration', requirePermission('billing:write'), asyncHandler(async (req, res) => {
   const data = migrationFields.extend({ confirmed: z.literal(true) }).superRefine(validateMigrationAmounts).parse(req.body);
   const resident = await Resident.findById(req.params.id); if (!resident) return res.status(404).json({ error: 'Resident not found.' });
   if (!await residentIsInScope(req, String(resident._id))) return res.status(403).json({ error: 'You do not have access to this residentâ€™s property.' });
-  const goLiveDate = data.goLiveDate; const periodKey = periodKeyFor(goLiveDate); const rentPaise = paiseFromRupees(data.monthlyRent, true);
+  const goLiveDate = data.goLiveDate; const periodKey = rentCycleStartPeriodFor(goLiveDate, data.dueDay); const rentPaise = paiseFromRupees(data.monthlyRent, true);
   const arrearsPaise = paiseFromRupees(data.openingArrears, true); const prepaidPaise = paiseFromRupees(data.prepaidRent, true); const currentSettledPaise = paiseFromRupees(data.currentPeriodSettled, true); const depositHeldPaise = paiseFromRupees(data.securityDepositHeld, true);
   const openingPosition = migrationOpeningPosition(arrearsPaise, prepaidPaise);
   const depositEntries = await DepositTransaction.find({ residentId: resident._id }).lean();
@@ -394,8 +416,8 @@ router.post('/residents/:id/migration', requirePermission('billing:write'), asyn
         await AuditEvent.create([{ actorId: req.user!.id, action: 'EXTERNAL_RENT_SETTLEMENT_RECORDED', entityType: 'Charge', entityId: String(existingCharge._id), reason: data.description, details: { source: data.source, periodKey, amountPaise: currentSettledPaise } }], { session });
       }
       const prepaidAppliedToArrearsPaise = openingPosition.prepaidAppliedToArrearsPaise;
-      const dueDay = billingDayForDate(resident.admissionDate);
-      const billingStartDate = billingStartDateForPeriod(periodKey, dueDay);
+      const dueDay = data.dueDay;
+      const billingStartDate = billingCycleStartDate(periodKey, dueDay);
       const migration = (await ResidentMigration.create([{ residentId: resident._id, goLiveDate, periodKey, monthlyRentPaise: rentPaise, dueDay, openingArrearsPaise: arrearsPaise, prepaidRentPaise: prepaidPaise, currentPeriodSettledPaise: currentSettledPaise, creditRemainingPaise: openingPosition.creditRemainingPaise, securityDepositHeldPaise: depositHeldPaise, source: data.source, description: data.description, createdBy: req.user!.id }], { session }))[0]!;
       resident.billingStartDate = billingStartDate;
       resident.securityDepositPaise = depositHeldPaise;
@@ -522,11 +544,9 @@ router.post('/residents/:id/checkout', requirePermission('residents:write'), asy
     }
     const depositEntries = await DepositTransaction.find({ residentId: current._id }).session(session).lean();
     const depositBalance = depositEntries.reduce((sum, entry) => sum + (entry.kind === 'RECEIVED' ? entry.amountPaise : ['REFUNDED', 'APPLIED'].includes(entry.kind) ? -entry.amountPaise : 0), 0);
-    // A rent charge is keyed to the calendar month in which its monthly cycle
-    // starts (for example, period 2026-10 with a due day of Oct 20 covers the
-    // Oct 20–Nov 20 stay). On checkout, cancel that cycle's fully unpaid rent.
-    const checkoutPeriod = periodKeyFor(data.effectiveEndDate);
-    const checkoutCycleCharges = await Charge.find({ residentId: current._id, kind: 'RENT', periodKey: checkoutPeriod, paidPaise: 0, externalPaidPaise: 0 }).session(session);
+    const dueDay = current.rentSchedules.at(-1)?.dueDay ?? billingDayForDate(current.admissionDate);
+    const checkoutPeriod = rentCycleStartPeriodFor(data.effectiveEndDate, dueDay);
+    const checkoutCycleCharges = await Charge.find({ residentId: current._id, kind: 'RENT', periodKey: { $gte: checkoutPeriod }, paidPaise: 0, externalPaidPaise: 0 }).session(session);
     const cancelledRentCharges = checkoutCycleCharges.map((charge) => ({ chargeId: charge._id, description: charge.description, periodKey: charge.periodKey, amountPaise: charge.amountPaise }));
     if (checkoutCycleCharges.length) {
       await Charge.deleteMany({ _id: { $in: checkoutCycleCharges.map((charge) => charge._id) } }).session(session);
@@ -645,9 +665,9 @@ router.post('/residents/:id/readmit', requirePermission('residents:write'), asyn
   const preserveOriginalAdmissionDate = businessDate(data.admissionDate) === businessDate(resident.admissionDate);
   if (resident.effectiveEndDate && data.admissionDate < resident.effectiveEndDate && !preserveOriginalAdmissionDate) return res.status(422).json({ error: 'The new admission date cannot be before the previous checkout date.' });
   const reAdmissionDate = preserveOriginalAdmissionDate ? new Date() : data.admissionDate;
-  const billingStartDate = admissionBillingStartDate(reAdmissionDate, preserveOriginalAdmissionDate ? resident.admissionDate : data.admissionDate);
-  const periodKey = periodKeyFor(billingStartDate);
   const dueDay = billingDayForDate(preserveOriginalAdmissionDate ? resident.admissionDate : data.admissionDate);
+  const periodKey = rentCycleStartPeriodFor(reAdmissionDate, dueDay);
+  const billingStartDate = billingCycleStartDate(periodKey, dueDay);
   const monthlyRentPaise = paiseFromRupees(data.monthlyRent);
   try {
     const result = await inTransaction(async (session) => {
@@ -690,8 +710,8 @@ router.get('/residents/:id/preview-rent', requirePermission('residents:read'), a
   const resident = await Resident.findById(req.params.id).select('admissionDate').lean();
   if (!resident) return res.status(404).json({ error: 'Resident not found.' });
   if (!await residentIsInScope(req, String(req.params.id))) return res.status(403).json({ error: 'You do not have access to this residentâ€™s property.' });
-  const periodKey = periodKeyFor(data.billingStartDate);
-  return res.json({ policy: 'FULL_MONTH', periodKey, amountPaise: paiseFromRupees(data.monthlyRent), dueAt: dueDateForPeriod(periodKey, billingDayForDate(resident.admissionDate)) });
+  const periodKey = rentCycleStartPeriodFor(data.billingStartDate, data.dueDay);
+  return res.json({ policy: 'FULL_MONTH', periodKey, amountPaise: paiseFromRupees(data.monthlyRent), dueAt: dueDateForPeriod(periodKey, data.dueDay) });
 }));
 
 export default router;

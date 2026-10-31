@@ -14,6 +14,41 @@ export function periodKeyFor(date: Date): string {
   return `${year}-${month}`;
 }
 
+function businessDateParts(date: Date) {
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date);
+  return { year: Number(parts.find((part) => part.type === 'year')?.value), month: Number(parts.find((part) => part.type === 'month')?.value), day: Number(parts.find((part) => part.type === 'day')?.value) };
+}
+
+function periodKey(year: number, month: number) {
+  const normalized = new Date(Date.UTC(year, month - 1, 1));
+  return `${normalized.getUTCFullYear()}-${String(normalized.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+function businessDayNumber(date: Date) {
+  const { year, month, day } = businessDateParts(date);
+  return Date.UTC(year, month - 1, day) / 86_400_000;
+}
+
+/** Returns the month of the latest resident anniversary on or before checkout. */
+export function rentCycleStartPeriodFor(date: Date, dueDay: number): string {
+  const { year, month, day } = businessDateParts(date);
+  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  if (day >= Math.min(Math.max(1, dueDay), lastDay)) return periodKey(year, month);
+  const previous = new Date(Date.UTC(year, month - 2, 1));
+  return periodKey(previous.getUTCFullYear(), previous.getUTCMonth() + 1);
+}
+
+/** Noon UTC is an unambiguous storage anchor for an India-local cycle date. */
+export function billingCycleStartDate(period: string, dueDay: number): Date {
+  const [year = 2000, month = 1] = period.split('-').map(Number);
+  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return new Date(Date.UTC(year, month - 1, Math.min(Math.max(1, dueDay), lastDay), 12));
+}
+
+export function businessDateOrdinal(date: Date): number {
+  return businessDayNumber(date);
+}
+
 export function billingDayForDate(date: Date): number {
   return Number(new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', day: '2-digit' }).format(date));
 }

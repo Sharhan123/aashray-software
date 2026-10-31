@@ -2,7 +2,7 @@ import mongoose from 'mongoose';
 import { connectDatabase } from '../config/database.js';
 import { Charge } from '../models/Charge.js';
 import { Resident } from '../models/Resident.js';
-import { billingDayForDate, billingStartDateForPeriod, dueDateForPeriod, periodKeyFor } from '../services/billingRules.js';
+import { billingDayForDate, billingStartDateForPeriod, dueDateForPeriod, periodKeyFor, rentCycleStartPeriodFor } from '../services/billingRules.js';
 
 function laterPeriod(first: string, second: string) {
   return first >= second ? first : second;
@@ -53,17 +53,20 @@ async function main() {
     throw new Error(`${invalidAdmissionDates} resident records have a missing or invalid admissionDate; no database changes were made.`);
   }
 
-  const currentCharges = await Charge.find({ kind: 'RENT', periodKey: currentPeriod }).select('_id residentId dueAt').lean();
+  const currentCycleByResident = new Map([...residentPlans].map(([residentId, plan]) => [residentId, rentCycleStartPeriodFor(now, plan.day)]));
+  const currentCyclePeriods = [...new Set(currentCycleByResident.values())];
+  const currentCharges = await Charge.find({ kind: 'RENT', residentId: { $in: residents.map((resident) => resident._id) }, periodKey: { $in: currentCyclePeriods } }).select('_id residentId periodKey dueAt').lean();
   for (const charge of currentCharges) {
-    const plan = residentPlans.get(String(charge.residentId));
-    if (!plan) continue;
-    const dueAt = dueDateForPeriod(currentPeriod, plan.day);
+    const residentId = String(charge.residentId);
+    const plan = residentPlans.get(residentId);
+    if (!plan || currentCycleByResident.get(residentId) !== charge.periodKey) continue;
+    const dueAt = dueDateForPeriod(charge.periodKey, plan.day);
     if (charge.dueAt.getTime() !== dueAt.getTime()) {
       chargeUpdates.push({ updateOne: { filter: { _id: charge._id }, update: { $set: { dueAt } } } });
     }
   }
 
-  console.log(`Mode: ${apply ? 'APPLY' : 'PREVIEW'}; business month: ${currentPeriod}`);
+  console.log(`Mode: ${apply ? 'APPLY' : 'PREVIEW'}; business month: ${currentPeriod}; resident-cycle charges are selected individually`);
   console.log(`Residents scanned: ${residents.length}`);
   console.log(`Resident billing dates/schedules to update: ${residentUpdates.length}`);
   console.log(`Current-month rent due dates to correct: ${chargeUpdates.length}`);

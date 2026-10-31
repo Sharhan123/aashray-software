@@ -54,7 +54,7 @@ router.get('/dashboard', requirePermission('dashboard:read'), asyncHandler(async
       { $group: { _id: '$residentId', balancePaise: { $sum: { $switch: { branches: [{ case: { $eq: ['$kind', 'RECEIVED'] }, then: '$amountPaise' }, { case: { $in: ['$kind', ['REFUNDED', 'APPLIED']] }, then: { $multiply: ['$amountPaise', -1] } }], default: 0 } } } } },
       { $group: { _id: null, total: { $sum: { $max: [0, '$balancePaise'] } } } },
     ]),
-    Charge.find({ kind: 'RENT', ...rentChargeMongoFilter('UPCOMING', now), periodKey: currentPeriod, ...chargeResidentFilter }).populate('residentId', 'residentId fullName').sort({ dueAt: 1 }).limit(8).lean(),
+    Charge.find({ kind: 'RENT', ...rentChargeMongoFilter('UPCOMING', now), ...chargeResidentFilter }).populate('residentId', 'residentId fullName').sort({ dueAt: 1 }).limit(8).lean(),
     Payment.find({ reversedAt: null, ...paymentResidentFilter }).populate('residentId', 'residentId fullName').sort({ createdAt: -1, _id: -1 }).limit(8).lean(), Resident.find(residentFilter).sort({ admissionDate: -1 }).limit(8).select('residentId fullName admissionDate').lean(),
   ]);
   const [properties, activeRooms, activeGenderCounts] = await Promise.all([
@@ -348,7 +348,66 @@ router.get('/reports/:name', requirePermission('reports:read'), asyncHandler(asy
   const scopedChargeFilter = accessResidents.ids === null ? {} : { residentId: { $in: accessResidents.ids } };
   const from = req.query.from ? new Date(String(req.query.from)) : new Date('2000-01-01T00:00:00Z'); const to = req.query.to ? new Date(String(req.query.to)) : new Date('2100-01-01T00:00:00Z');
   let rows: Record<string, unknown>[];
-  if (name === 'residents' || name === 'admissions') rows = (await Resident.find({ ...scopedResidentFilter, ...(propertyResidentIds ? { _id: { $in: propertyResidentIds } } : {}), ...(name === 'admissions' ? { admissionDate: { $gte: from, $lte: to } } : {}) }).sort({ fullName: 1 }).lean()).map((r) => ({ residentId: r.residentId, name: r.fullName, mobile: r.mobile, status: r.status, admissionDate: r.admissionDate, room: r.allocations.find((a) => !a.endDate)?.roomNumber ?? '', rentRupees: (r.rentSchedules.at(-1)?.monthlyRentPaise ?? 0) / 100 }));
+  if (name === 'residents') {
+    const [residents, properties, reportRooms] = await Promise.all([
+      Resident.find({ ...scopedResidentFilter, status: 'ACTIVE', ...(propertyResidentIds ? { _id: { $in: propertyResidentIds } } : {}) }).sort({ fullName: 1 }).lean(),
+      Property.find(propertyId ? { _id: propertyId } : req.user?.role === 'SUPER_ADMIN' ? {} : { _id: { $in: (req.user?.propertyIds ?? []).map((id) => new Types.ObjectId(id)) } }).sort({ name: 1 }).lean(),
+      Room.find({ ...(accessRooms.ids === null ? {} : { _id: { $in: accessRooms.ids } }), ...(propertyId ? { propertyId } : {}) }).lean(),
+    ]);
+    const residentIds = residents.map((resident) => resident._id);
+    const residentById = new Map(residents.map((resident) => [String(resident._id), resident]));
+    const roomById = new Map(reportRooms.map((room) => [String(room._id), room]));
+    const propertyById = new Map(properties.map((property) => [String(property._id), property]));
+    const depositEntries = residentIds.length ? await DepositTransaction.find({ residentId: { $in: residentIds } }).select('residentId amountPaise kind').lean() : [];
+    const depositBalanceByResident = new Map<string, number>();
+    const residentIdsWithDepositLedger = new Set<string>();
+    for (const entry of depositEntries) {
+      const key = String(entry.residentId);
+      residentIdsWithDepositLedger.add(key);
+      const delta = entry.kind === 'RECEIVED' ? entry.amountPaise : ['REFUNDED', 'APPLIED'].includes(entry.kind) ? -entry.amountPaise : 0;
+      depositBalanceByResident.set(key, (depositBalanceByResident.get(key) ?? 0) + delta);
+    }
+    for (const resident of residents) {
+      const key = String(resident._id);
+      if (!residentIdsWithDepositLedger.has(key)) depositBalanceByResident.set(key, resident.securityDepositPaise ?? 0);
+    }
+    const activeRooms = reportRooms.filter((room) => room.active && room.propertyId && propertyById.has(String(room.propertyId)));
+    const activeAllocations = activeRooms.length ? await RoomAllocation.find({ active: true, roomId: { $in: activeRooms.map((room) => room._id) } }).lean() : [];
+    const allocationByBed = new Map(activeAllocations.map((allocation) => [`${String(allocation.roomId)}:${allocation.bedId}`, allocation]));
+    const currentlyAssigned = new Set(activeAllocations.map((allocation) => String(allocation.residentId)));
+    const reportRows: Record<string, unknown>[] = [];
+    const rowForResident = (resident: (typeof residents)[number], propertyName: string, roomNumber: string, bed: string) => ({
+      propertyName, roomNumber, bed, name: resident.fullName, mobile: resident.mobile, status: resident.status,
+      admissionDate: resident.admissionDate, rentRupees: (resident.rentSchedules.at(-1)?.monthlyRentPaise ?? 0) / 100,
+      depositRupees: Math.max(0, depositBalanceByResident.get(String(resident._id)) ?? 0) / 100,
+    });
+    for (const property of properties) {
+      const propertyIdString = String(property._id);
+      const rooms = activeRooms.filter((room) => String(room.propertyId) === propertyIdString).sort((a, b) => a.roomNumber.localeCompare(b.roomNumber, undefined, { numeric: true, sensitivity: 'base' }));
+      for (const room of rooms) {
+        const bedIds = room.beds.filter((bed) => bed.active !== false).map((bed) => bed.bedId);
+        const slots = bedIds.length ? bedIds : Array.from({ length: room.capacity }, (_, index) => String(index + 1));
+        for (const allocation of activeAllocations.filter((item) => String(item.roomId) === String(room._id))) if (!slots.includes(allocation.bedId)) slots.push(allocation.bedId);
+        for (const bedId of slots.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))) {
+          const allocation = allocationByBed.get(`${String(room._id)}:${bedId}`);
+          const resident = allocation ? residentById.get(String(allocation.residentId)) : null;
+          reportRows.push(resident
+            ? rowForResident(resident, property.name, room.roomNumber, bedId)
+            : { propertyName: property.name, roomNumber: room.roomNumber, bed: bedId, name: 'Empty bed', mobile: '', status: 'VACANT', admissionDate: '', rentRupees: 0, depositRupees: 0 });
+        }
+      }
+    }
+    // Keep checked-out and legacy records visible, while leaving their former bed marked unoccupied.
+    for (const resident of residents) {
+      if (currentlyAssigned.has(String(resident._id))) continue;
+      const lastAllocation = [...resident.allocations].reverse().find((allocation) => allocation.roomId);
+      const historicalRoom = lastAllocation?.roomId ? roomById.get(String(lastAllocation.roomId)) : undefined;
+      const propertyName = historicalRoom?.propertyId ? propertyById.get(String(historicalRoom.propertyId))?.name ?? historicalRoom.propertyName : 'Unassigned property';
+      reportRows.push(rowForResident(resident, propertyName || 'Unassigned property', lastAllocation?.roomNumber ?? historicalRoom?.roomNumber ?? '', '—'));
+    }
+    rows = reportRows.sort((a, b) => String(a.propertyName).localeCompare(String(b.propertyName), undefined, { numeric: true, sensitivity: 'base' }) || String(a.roomNumber).localeCompare(String(b.roomNumber), undefined, { numeric: true, sensitivity: 'base' }) || String(a.bed).localeCompare(String(b.bed), undefined, { numeric: true, sensitivity: 'base' }) || String(a.name).localeCompare(String(b.name)));
+  }
+  else if (name === 'admissions') rows = (await Resident.find({ ...scopedResidentFilter, ...(propertyResidentIds ? { _id: { $in: propertyResidentIds } } : {}), admissionDate: { $gte: from, $lte: to } }).sort({ fullName: 1 }).lean()).map((r) => ({ residentId: r.residentId, name: r.fullName, mobile: r.mobile, status: r.status, admissionDate: r.admissionDate, room: r.allocations.find((a) => !a.endDate)?.roomNumber ?? '', rentRupees: (r.rentSchedules.at(-1)?.monthlyRentPaise ?? 0) / 100 }));
   else if (name === 'occupancy') rows = await Room.aggregate([{ $match: { active: true, ...(accessRooms.ids === null ? {} : { _id: { $in: accessRooms.ids } }), ...(propertyId ? { propertyId: new Types.ObjectId(propertyId) } : {}) } }, { $lookup: { from: 'roomallocations', let: { rid: '$_id' }, pipeline: [{ $match: { $expr: { $and: [{ $eq: ['$roomId', '$$rid'] }, { $eq: ['$active', true] }] } } }], as: 'allocations' } }, { $project: { roomNumber: 1, roomType: 1, capacity: 1, occupied: { $size: '$allocations' }, available: { $subtract: ['$capacity', { $size: '$allocations' }] } } }]);
   else if (name === 'collections') rows = (await Payment.find({ paymentDate: { $gte: from, $lte: to }, reversedAt: null, ...scopedPaymentFilter, ...(propertyResidentIds ? { residentId: { $in: propertyResidentIds } } : {}) }).populate('residentId', 'residentId fullName').sort({ paymentDate: -1 }).lean()).map((p) => ({ date: p.paymentDate, resident: (p.residentId as unknown as { fullName: string }).fullName, method: p.method, amountRupees: p.amountPaise / 100, reference: p.reference }));
   else { const filter: Record<string, unknown> = { dueAt: { $gte: from, $lte: to }, ...scopedChargeFilter, ...(propertyResidentIds ? { residentId: { $in: propertyResidentIds } } : {}) }; if (name === 'overdue') { const overdue = rentChargeMongoFilter('OVERDUE') as { dueAt: unknown; $expr: unknown }; filter.kind = 'RENT'; filter.$and = [{ dueAt: overdue.dueAt }, { dueAt: { $gte: from, $lte: to } }, { $expr: overdue.$expr }]; delete filter.dueAt; } if (name === 'utilities') filter.kind = 'UTILITY'; if (name === 'rent') filter.kind = 'RENT'; if (name === 'outstanding') filter.$expr = { $lt: [{ $add: ['$paidPaise', { $ifNull: ['$externalPaidPaise', 0] }] }, '$amountPaise'] }; rows = (await Charge.find(filter).populate('residentId', 'residentId fullName').sort({ dueAt: 1 }).lean()).map((c) => { const resident = c.residentId as unknown as { fullName: string }; const rentLedger = c.kind === 'RENT' ? rentChargeLedger(c) : null; const ledger = rentLedger ?? chargeLedger(c); return { resident: resident.fullName, kind: c.kind, description: c.description, period: c.periodKey, servicePeriodStart: c.servicePeriodStart ?? null, servicePeriodEnd: c.servicePeriodEnd ?? null, dueAt: c.dueAt, amountRupees: c.amountPaise / 100, paidRupees: c.paidPaise / 100, externalPaidRupees: (c.externalPaidPaise ?? 0) / 100, outstandingRupees: ledger.balancePaise / 100, status: ledger.status, ...(rentLedger ? { rentStatus: rentLedger.rentStatus, daysPastDue: rentLedger.daysPastDue } : {}) }; }); }

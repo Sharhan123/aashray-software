@@ -22,7 +22,7 @@ export type ReceiptPdfData = {
     roomId?: { roomNumber?: string; propertyName?: string; propertyId?: { name?: string } };
     bedId?: string;
   };
-  breakdown?: { amountPaise: number; charge?: { periodKey?: string; servicePeriodStart?: string; servicePeriodEnd?: string; description?: string } }[];
+  breakdown?: { amountPaise: number; charge?: { kind?: string; periodKey?: string; dueAt?: string; servicePeriodStart?: string; servicePeriodEnd?: string; description?: string } }[];
 };
 
 export type CheckoutSummaryPdfData = {
@@ -56,7 +56,24 @@ const MUTED = '#71809a';
 const LINE = '#dce5f0';
 const formatMoney = (paise = 0) => `Rs. ${(paise / 100).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const formatDate = (value: string) => new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' }).format(new Date(value));
-const chargePeriod = (charge?: { periodKey?: string; servicePeriodStart?: string; servicePeriodEnd?: string }) => charge?.servicePeriodStart && charge.servicePeriodEnd ? `${formatDate(charge.servicePeriodStart)} to ${formatDate(charge.servicePeriodEnd)}` : charge?.periodKey ?? '';
+export function chargePeriodLabel(charge?: { kind?: string; periodKey?: string; dueAt?: string; servicePeriodStart?: string; servicePeriodEnd?: string }) {
+  if (charge?.servicePeriodStart && charge.servicePeriodEnd) return `${formatDate(charge.servicePeriodStart)} to ${formatDate(charge.servicePeriodEnd)}`;
+  if (charge?.kind === 'RENT' && charge.dueAt) {
+    const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date(charge.dueAt));
+    const value = (type: string) => Number(parts.find((part) => part.type === type)?.value);
+    const year = value('year'); const month = value('month'); const day = value('day');
+    if (year && month && day) {
+      const start = new Date(Date.UTC(year, month - 1, day, 12));
+      const nextMonthLastDay = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+      const nextCycleStartDay = Math.min(day, nextMonthLastDay);
+      const end = new Date(Date.UTC(year, month, nextCycleStartDay - 1, 12));
+      return `${formatDate(start.toISOString())} to ${formatDate(end.toISOString())}`;
+    }
+  }
+  return charge?.periodKey ?? '';
+}
+
+const chargePeriod = chargePeriodLabel;
 
 function makeReceiptCanvas(data: ReceiptPdfData, amountWords: string, brandLogo: HTMLImageElement) {
   const canvas = document.createElement('canvas');
@@ -100,11 +117,15 @@ function makeReceiptCanvas(data: ReceiptPdfData, amountWords: string, brandLogo:
   ctx.fillStyle = BLUE; ctx.fillRect(left, 315, 8, 180);
   ctx.textAlign = 'left'; ctx.fillStyle = MUTED; ctx.font = 'bold 18px Arial, sans-serif'; ctx.fillText('AMOUNT RECEIVED', left + 34, 357);
   ctx.fillStyle = NAVY; ctx.font = 'bold 56px Arial, sans-serif'; ctx.fillText(formatMoney(data.amountPaise), left + 34, 425);
-  ctx.fillStyle = INK; ctx.font = '19px Arial, sans-serif'; ctx.fillText('In words: ' + fitText(ctx, amountWords, width - 68), left + 34, 466);
+  ctx.fillStyle = INK; ctx.font = '19px Arial, sans-serif'; ctx.fillText('In words: ' + fitText(ctx, amountWords, 610), left + 34, 466);
   const statusText = data.reversedAt ? 'REVERSED' : 'PAID';
   const badgeWidth = data.reversedAt ? 150 : 112;
   ctx.fillStyle = data.reversedAt ? '#fff0f0' : '#e5f5ed'; ctx.beginPath(); ctx.roundRect(right - badgeWidth - 30, 340, badgeWidth, 42, 21); ctx.fill();
   ctx.textAlign = 'center'; ctx.fillStyle = data.reversedAt ? '#a83434' : '#19734b'; ctx.font = 'bold 17px Arial, sans-serif'; ctx.fillText(statusText, right - badgeWidth / 2 - 30, 367);
+  const periodX = left + 700; const periodWidth = right - periodX - 22;
+  ctx.strokeStyle = '#d6e8ee'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(periodX - 24, 340); ctx.lineTo(periodX - 24, 470); ctx.stroke();
+  ctx.textAlign = 'left'; ctx.fillStyle = MUTED; ctx.font = 'bold 16px Arial, sans-serif'; ctx.fillText('BILLED PERIOD', periodX, 410);
+  ctx.fillStyle = NAVY; ctx.font = 'bold 19px Arial, sans-serif'; wrapText(ctx, periods.length ? periods.join(' · ') : 'No charge linked', periodX, 442, periodWidth, 25, 2);
 
   // Resident details.
   drawSectionTitle(ctx, left, 550, 'Billed to');
@@ -127,7 +148,6 @@ function makeReceiptCanvas(data: ReceiptPdfData, amountWords: string, brandLogo:
   drawRule(ctx, left, 992, width);
   drawField(ctx, left, 1038, 'Room', room, 320);
   drawField(ctx, left + 365, 1038, 'Bed', bed, 280);
-  drawField(ctx, left + 700, 1038, 'Billed period', periods.length ? `${periods[0]}${periods.length > 1 ? ` to ${periods.at(-1)}` : ''}` : 'No charge linked', 360);
   drawField(ctx, left, 1102, 'Monthly rent (current)', formatMoney(monthlyRent), 480);
   drawField(ctx, left + 540, 1102, 'Deposit held (current)', formatMoney(resident?.securityDepositPaise ?? 0), 500);
 
@@ -135,13 +155,13 @@ function makeReceiptCanvas(data: ReceiptPdfData, amountWords: string, brandLogo:
   drawSectionTitle(ctx, left, 1192, 'Payment allocation');
   const tableY = 1220; const tableRight = right;
   ctx.fillStyle = PALE_BLUE; ctx.fillRect(left, tableY, width, 45);
-  ctx.fillStyle = DARK_BLUE; ctx.font = 'bold 16px Arial, sans-serif'; ctx.textAlign = 'left'; ctx.fillText('CHARGE / PERIOD', left + 14, tableY + 29); ctx.textAlign = 'right'; ctx.fillText('AMOUNT', tableRight - 14, tableY + 29);
+  ctx.fillStyle = DARK_BLUE; ctx.font = 'bold 16px Arial, sans-serif'; ctx.textAlign = 'left'; ctx.fillText('CHARGE', left + 14, tableY + 29); ctx.textAlign = 'right'; ctx.fillText('AMOUNT', tableRight - 14, tableY + 29);
   const breakdown = data.breakdown ?? []; const shown = breakdown.slice(0, 3); let rowY = tableY + 45;
   if (!shown.length) {
     drawAllocationRow(ctx, left, rowY, width, 'Payment recorded to resident account', 'Not linked to a charge'); rowY += 50;
   } else {
     for (const item of shown) {
-      const description = [item.charge?.description, chargePeriod(item.charge)].filter(Boolean).join(' | ') || 'Resident charge';
+      const description = item.charge?.description || 'Resident charge';
       drawAllocationRow(ctx, left, rowY, width, description, formatMoney(item.amountPaise)); rowY += 50;
     }
     if (breakdown.length > shown.length) {
@@ -228,7 +248,10 @@ export function openReportPrintView(report: string, rows: ReportPdfRow[], range:
   if (!printWindow) throw new Error('The report print window was blocked. Allow pop-ups for this site and try again.');
   const maxRows = 1000;
   if (rows.length > maxRows) throw new Error(`This report has ${rows.length.toLocaleString('en-IN')} rows. Print-ready PDF is limited to ${maxRows.toLocaleString('en-IN')} rows per file. Narrow the date range or download CSV for the complete report.`);
-  const columns = rows.length ? Object.keys(rows[0]!) : ['result'];
+  const residentReport = report === 'residents';
+  const columns = residentReport
+    ? ['bed', 'name', 'mobile', 'status', 'admissionDate', 'rentRupees', 'depositRupees']
+    : rows.length ? Object.keys(rows[0]!) : ['result'];
   const generatedAt = new Intl.DateTimeFormat('en-IN', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Kolkata' }).format(new Date());
   const escapeHtml = (value: unknown) => String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
   const formatValue = (key: string, value: unknown) => {
@@ -239,13 +262,28 @@ export function openReportPrintView(report: string, rows: ReportPdfRow[], range:
     return String(value);
   };
   const title = report.replace(/[-_]/g, ' ').replace(/\b\w/g, (character) => character.toUpperCase());
-  const headings = columns.map((column) => `<th>${escapeHtml(column.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/_/g, ' '))}</th>`).join('');
-  const body = rows.map((row) => `<tr>${columns.map((column) => `<td>${escapeHtml(formatValue(column, row[column])) || '—'}</td>`).join('')}</tr>`).join('');
+  const headingFor = (column: string) => ({ bed: 'Bed', name: 'Resident', mobile: 'Mobile', status: 'Status', admissionDate: 'Admission date', rentRupees: 'Monthly rent', depositRupees: 'Deposit held' } as Record<string, string>)[column] ?? column.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/_/g, ' ');
+  const headings = columns.map((column) => `<th>${escapeHtml(headingFor(column))}</th>`).join('');
+  const rowHtml = (row: ReportPdfRow) => `<tr${residentReport && row.status === 'VACANT' ? ' class="vacant-row"' : ''}>${columns.map((column) => `<td data-label="${escapeHtml(headingFor(column))}"><span>${escapeHtml(formatValue(column, row[column])) || '—'}</span></td>`).join('')}</tr>`;
+  const body = residentReport
+    ? [...new Set(rows.map((row) => String(row.propertyName || 'Unassigned property')))].map((propertyName) => {
+      const propertyRows = rows.filter((row) => String(row.propertyName || 'Unassigned property') === propertyName);
+      const roomNumbers = [...new Set(propertyRows.map((row) => String(row.roomNumber || 'Unassigned room')))];
+      const roomGroups = roomNumbers.map((roomNumber) => {
+        const roomRows = propertyRows.filter((row) => String(row.roomNumber || 'Unassigned room') === roomNumber);
+        const occupiedBeds = roomRows.filter((row) => row.status !== 'VACANT').length;
+        const vacantBeds = roomRows.filter((row) => row.status === 'VACANT').length;
+        const roomTitle = roomNumber === 'Unassigned room' ? roomNumber : `Room ${roomNumber}`;
+        return `<tr class="room-group-row"><td colspan="${columns.length}"><span class="room-group-label"><strong>${escapeHtml(roomTitle)}</strong><span>${occupiedBeds} occupied &middot; ${vacantBeds} vacant</span></span></td></tr>${roomRows.map(rowHtml).join('')}`;
+      }).join('');
+      return `<section class="property-group"><h2>${escapeHtml(propertyName)}</h2><table class="resident-report-table"><thead><tr>${headings}</tr></thead><tbody>${roomGroups}</tbody></table></section>`;
+    }).join('')
+    : `<table><thead><tr>${headings}</tr></thead><tbody>${rows.map(rowHtml).join('') || `<tr><td colspan="${Math.max(1, columns.length)}">No records found for this report and date range.</td></tr>`}</tbody></table>`;
   const rangeText = range.from || range.to ? `${range.from || 'Any start'} to ${range.to || 'Current'}` : 'All available dates';
   printWindow.document.open();
   printWindow.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Aashray ${escapeHtml(title)} report</title><style>
-    @page{size:A4 landscape;margin:14mm}*{box-sizing:border-box}body{margin:0;color:#20384b;font:12px Arial,sans-serif;-webkit-print-color-adjust:exact;print-color-adjust:exact}.topline{height:7px;background:linear-gradient(90deg,#1681b4,#48b2d1,#8673c5);margin-bottom:22px}.brand{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #dce7ed;padding:0 0 14px}.brand img{max-width:180px;max-height:58px;object-fit:contain}.brand span,.meta small{color:#668095;font-size:9px;font-weight:bold;letter-spacing:.14em}.heading{display:flex;justify-content:space-between;align-items:flex-end;gap:20px;margin:22px 0 14px}.heading h1{margin:0 0 5px;color:#18354b;font-size:24px}.heading p{margin:0;color:#63798b;font-size:11px}.meta{text-align:right;color:#60788b;font-size:10px;line-height:1.7}.scope{margin:0 0 13px;padding:9px 12px;border:1px solid #d9e7ed;border-radius:7px;background:#f2f8fa;color:#49677b;font-size:10px}table{width:100%;border-collapse:collapse;table-layout:fixed}thead{display:table-header-group}th{padding:9px 8px;background:#e9f3f7;color:#34566b;text-align:left;text-transform:uppercase;font-size:9px;letter-spacing:.05em;border-bottom:1px solid #cfdee5}td{padding:7px 8px;border-bottom:1px solid #e3ebef;color:#3f5567;font-size:10px;line-height:1.35;overflow-wrap:anywhere;vertical-align:top}tbody tr:nth-child(even){background:#f7fafc}tr{break-inside:avoid;page-break-inside:avoid}.foot{margin-top:15px;padding-top:9px;border-top:1px solid #dce7ed;color:#75899a;font-size:9px}.screen-note{margin:12px 0;color:#526a7d;font-size:12px}@media screen{body{max-width:1200px;margin:30px auto;padding:28px;box-shadow:0 8px 40px #132d421c}.topline{border-radius:9px}}
-    </style></head><body><div class="topline"></div><header class="brand"><img src="${escapeHtml(aashrayLogoUrl)}" alt="Aashray Hospitality"><span>OPERATIONS REPORT</span></header><section class="heading"><div><h1>${escapeHtml(title)} report</h1><p>${escapeHtml(rangeText)}</p></div><div class="meta"><small>GENERATED</small><br>${escapeHtml(generatedAt)}<br>${rows.length.toLocaleString('en-IN')} records</div></section>${range.propertyId ? `<p class="scope">Property scope: ${escapeHtml(range.propertyId)}</p>` : ''}<table><thead><tr>${headings}</tr></thead><tbody>${body || `<tr><td colspan="${Math.max(1, columns.length)}">No records found for this report and date range.</td></tr>`}</tbody></table><footer class="foot">Aashray Hospitality · Values and financial status are shown as returned by the report service.</footer><p class="screen-note">Use your browser’s print dialog and select “Save as PDF”.</p></body></html>`);
+    @page{size:A4 landscape;margin:9mm}*{box-sizing:border-box}body{margin:0;color:#20384b;font:11px Arial,sans-serif;-webkit-print-color-adjust:exact;print-color-adjust:exact}.topline{height:4px;background:linear-gradient(90deg,#1681b4,#48b2d1,#8673c5);margin-bottom:8px}.brand{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #dce7ed;padding:0 0 5px}.brand img{max-width:130px;max-height:36px;object-fit:contain}.brand span,.meta small{color:#668095;font-size:9px;font-weight:bold;letter-spacing:.1em}.heading{display:flex;justify-content:space-between;align-items:flex-end;gap:12px;margin:8px 0 6px}.heading h1{margin:0 0 4px;color:#18354b;font-size:20px}.heading p{margin:0;color:#63798b;font-size:11px}.meta{text-align:right;color:#60788b;font-size:10px;line-height:1.5}.scope{margin:0 0 7px;padding:5px 7px;border:1px solid #d9e7ed;border-radius:5px;background:#f2f8fa;color:#49677b;font-size:8px}.property-group{margin:0 0 5px}.property-group h2{margin:7px 0 4px;padding:5px 7px;background:#f2f8fa;border-left:3px solid #1681b4;color:#18354b;font-size:10px;break-after:avoid;page-break-after:avoid}.resident-report-table th:nth-child(1),.resident-report-table td:nth-child(1){width:6%}.resident-report-table th:nth-child(2),.resident-report-table td:nth-child(2){width:23%}.resident-report-table th:nth-child(3),.resident-report-table td:nth-child(3){width:13%}.resident-report-table th:nth-child(4),.resident-report-table td:nth-child(4){width:10%}.resident-report-table th:nth-child(5),.resident-report-table td:nth-child(5){width:15%}.resident-report-table th:nth-child(6),.resident-report-table td:nth-child(6){width:16%}.resident-report-table th:nth-child(7),.resident-report-table td:nth-child(7){width:17%}.room-group-label{display:flex;align-items:center;justify-content:space-between;gap:8px}.resident-report-table .room-group-row td{padding:5px 8px;background:#f2f8fa;color:#34566b;border-top:1px solid #cfdee5;border-bottom:1px solid #dce7ed;font-size:8px;break-after:avoid;page-break-after:avoid}.room-group-label>span{color:#71869a;font-size:9px;font-weight:600}table{width:100%;border-collapse:collapse;table-layout:fixed}thead{display:table-header-group}th{padding:6px 7px;background:#e9f3f7;color:#34566b;text-align:left;text-transform:uppercase;font-size:9px;letter-spacing:.04em;border-bottom:1px solid #cfdee5}td{padding:5px 7px;border-bottom:1px solid #e3ebef;color:#3f5567;font-size:10px;line-height:1.3;overflow-wrap:anywhere;vertical-align:top}tbody tr:nth-child(even){background:#f7fafc}.room-group-row td{background:#f2f8fa!important;color:#34566b!important;font-weight:700}.vacant-row td{background:#fff8e9;color:#8a5a12;font-weight:600}tr{break-inside:avoid;page-break-inside:avoid}.screen-note{display:none}@media screen{body{max-width:1200px;margin:30px auto;padding:28px;box-shadow:0 8px 40px #132d421c}.topline{border-radius:9px}}.foot{margin-top:12px;padding-top:7px;border-top:1px solid #dce7ed;color:#75899a;font-size:8px}.screen-note{margin:12px 0;color:#526a7d;font-size:12px}
+    </style></head><body><div class="topline"></div><header class="brand"><img src="${escapeHtml(aashrayLogoUrl)}" alt="Aashray Hospitality"><span>OPERATIONS REPORT</span></header><section class="heading"><div><h1>${escapeHtml(title)} report</h1><p>${escapeHtml(rangeText)}</p></div><div class="meta"><small>GENERATED</small><br>${escapeHtml(generatedAt)}<br>${rows.length.toLocaleString('en-IN')} records</div></section>${range.propertyId ? '<p class="scope">Property report</p>' : ''}${body || '<p>No records found for this report and date range.</p>'}<footer class="foot">Aashray Hospitality · Values and financial status are shown as returned by the report service.</footer><p class="screen-note">Use your browser’s print dialog and select “Save as PDF”.</p></body></html>`);
   printWindow.document.close();
   let printed = false;
   const startPrint = () => { if (printed) return; printed = true; window.setTimeout(() => { if (!printWindow.closed) printWindow.print(); }, 500); };

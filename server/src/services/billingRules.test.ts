@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { admissionBillingStartDate, billingDayForDate, chargeStatus, dueDateForBillingStart, dueDateForPeriod, paiseFromRupees, periodKeyFor } from './billingRules.js';
+import { admissionBillingStartDate, billingDayForDate, chargeStatus, dueDateForBillingStart, dueDateForPeriod, paiseFromRupees, periodKeyFor, rentCycleStartPeriodFor } from './billingRules.js';
 
 describe('billing rules', () => {
   it('uses each resident billing start calendar day as the monthly due day', () => {
@@ -25,6 +25,13 @@ describe('billing rules', () => {
   it('caps a due day of 31 at the end of shorter months', () => {
     expect(dueDateForPeriod('2025-02', 31).toISOString()).toBe('2025-02-28T18:29:59.999Z');
     expect(dueDateForPeriod('2024-02', 31).toISOString()).toBe('2024-02-29T18:29:59.999Z');
+  });
+
+  it('keeps checkout rent selection on the resident anniversary across a calendar-month boundary', () => {
+    expect(rentCycleStartPeriodFor(new Date('2026-11-02T00:00:00.000Z'), 26)).toBe('2026-10');
+    expect(rentCycleStartPeriodFor(new Date('2026-10-20T00:00:00.000Z'), 26)).toBe('2026-09');
+    expect(rentCycleStartPeriodFor(new Date('2026-11-24T00:00:00.000Z'), 26)).toBe('2026-10');
+    expect(rentCycleStartPeriodFor(new Date('2026-11-28T00:00:00.000Z'), 26)).toBe('2026-11');
   });
 
   it('uses the billing start month and distinguishes partial, paid, and overdue balances', () => {
