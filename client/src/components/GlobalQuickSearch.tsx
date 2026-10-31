@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowRight, Building2, CreditCard, FileText, LayoutDashboard, Search, UserRound, Users, Wrench, X } from 'lucide-react';
 import { api } from '../lib/api';
@@ -60,7 +60,7 @@ export function GlobalQuickSearch() {
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); setOpen(true); }
       if (event.key === 'Escape') setOpen(false);
     };
@@ -123,7 +123,7 @@ export function GlobalQuickSearch() {
   useEffect(() => setActiveIndex(0), [debouncedQuery, grouped.length]);
 
   const choose = (item: SearchItem) => { setOpen(false); navigate(item.href); };
-  const onInputKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+  const onInputKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
     if (event.key === 'ArrowDown') { event.preventDefault(); setActiveIndex((index) => Math.min(index + 1, grouped.length - 1)); }
     else if (event.key === 'ArrowUp') { event.preventDefault(); setActiveIndex((index) => Math.max(0, index - 1)); }
     else if (event.key === 'Enter' && grouped[activeIndex]) { event.preventDefault(); choose(grouped[activeIndex]!); }
