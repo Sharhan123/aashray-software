@@ -194,6 +194,7 @@ data class ResidentProfileResponse(
 data class CheckoutRequest(
     val effectiveEndDate: String,
     val reason: String,
+    val notes: String = "",
     val extraDays: Int = 0,
     val perDayRatePaise: Long = 0,
     val idempotencyKey: String,
@@ -203,6 +204,7 @@ data class CheckoutSummaryDto(
     val _id: String = "",
     val checkoutDate: String? = null,
     val reason: String = "",
+    val notes: String = "",
     val propertyName: String = "",
     val roomNumber: String = "",
     val bedId: String = "",

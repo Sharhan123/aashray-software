@@ -85,6 +85,7 @@ fun ResidentProfileScreen(canEdit: Boolean = false, canCheckout: Boolean = false
     var statementMessage by remember { mutableStateOf<String?>(null) }
     var checkoutDate by remember { mutableStateOf(LocalDate.now(ZoneId.of("Asia/Kolkata")).toString()) }
     var checkoutReason by remember { mutableStateOf("Resident checkout") }
+    var checkoutNotes by remember { mutableStateOf("") }
     var extraDays by remember { mutableStateOf("0") }
     var dailyRate by remember { mutableStateOf("") }
     val dayCount = extraDays.toIntOrNull() ?: 0
@@ -118,7 +119,8 @@ fun ResidentProfileScreen(canEdit: Boolean = false, canCheckout: Boolean = false
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("Any unpaid rent for the current billing cycle is cancelled on checkout. Extra stay charges are calculated per day and applied against the held deposit automatically.", style = MaterialTheme.typography.bodySmall)
                 OutlinedTextField(checkoutDate, { checkoutDate = it.take(10) }, Modifier.fillMaxWidth(), label = { Text("Checkout date (YYYY-MM-DD)") }, singleLine = true)
-                OutlinedTextField(checkoutReason, { checkoutReason = it.take(500) }, Modifier.fillMaxWidth(), label = { Text("Reason / notes") }, minLines = 2)
+                OutlinedTextField(checkoutReason, { checkoutReason = it.take(500) }, Modifier.fillMaxWidth(), label = { Text("Checkout reason") }, minLines = 2)
+                OutlinedTextField(checkoutNotes, { checkoutNotes = it.take(1000) }, Modifier.fillMaxWidth(), label = { Text("Checkout note (optional)") }, minLines = 2)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(extraDays, { extraDays = it.filter(Char::isDigit).take(2) }, Modifier.weight(1f), label = { Text("Extra days") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
                     OutlinedTextField(dailyRate, { dailyRate = it.filter { char -> char.isDigit() || char == '.' } }, Modifier.weight(1f), label = { Text("Per day (₹)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
@@ -133,6 +135,7 @@ fun ResidentProfileScreen(canEdit: Boolean = false, canCheckout: Boolean = false
                 viewModel.checkout(CheckoutRequest(
                     effectiveEndDate = checkoutDate,
                     reason = checkoutReason.trim(),
+                    notes = checkoutNotes.trim(),
                     extraDays = dayCount,
                     perDayRatePaise = (dayRateRupees * 100).toLong(),
                     idempotencyKey = UUID.randomUUID().toString(),
@@ -265,7 +268,8 @@ fun ResidentProfileScreen(canEdit: Boolean = false, canCheckout: Boolean = false
                                 Text(listOf(checkout.propertyName, checkout.roomNumber.takeIf(String::isNotBlank)?.let { "Room $it" }, checkout.bedId.takeIf(String::isNotBlank)?.let { "Bed $it" }).filterNotNull().filter(String::isNotBlank).joinToString(" · "), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 ProfileRow("Refundable deposit", money(checkout.refundableRemainingPaise))
                                 ProfileRow("Refunded so far", money(checkout.refundedToDatePaise))
-                                Text(checkout.reason, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("Reason: ${checkout.reason}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                if (checkout.notes.isNotBlank()) Text("Note: ${checkout.notes}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 if (checkout.refundableRemainingPaise > 0) {
                                     if (refundEligible) Button(onClick = { refundTarget = checkout; refundAmount = (checkout.refundableRemainingPaise / 100.0).toString() }, modifier = Modifier.fillMaxWidth(), enabled = canRefund && !checkoutBusy) { Text("Record deposit refund") }
                                     else Text("Refund available from ${refundAvailableDate?.let { dateLabel(it.toString()) } ?: "21 days after checkout"}.", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)

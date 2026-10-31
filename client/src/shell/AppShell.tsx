@@ -5,6 +5,7 @@ import { AashrayLogo, BrandMark } from '../components/BrandMark';
 import { useAuth } from '../state/useAuth';
 import { CloseButton, ProfileButton, ThemeToggle } from '../components/ui';
 import { api } from '../lib/api';
+import { GlobalQuickSearch } from '../components/GlobalQuickSearch';
 
 type OwnerReminderData = { _id: string; title: string; notes?: string; dueAt: string; repeatEveryHours?: number | null };
 
@@ -124,7 +125,7 @@ export function AppShell() {
     <div className={`mobile-backdrop ${drawerOpen ? 'backdrop-visible' : ''}`} onClick={() => setDrawerOpen(false)} />
     <div className={`sidebar-wrap ${drawerOpen ? 'drawer-open' : ''}`}>{sidebar}</div>
     <div className="shell-main">
-      <header className="topbar"><div className="topbar-left"><button className="mobile-menu" aria-label="Open navigation" onClick={() => setDrawerOpen(true)}><Menu size={21} /></button><div className="breadcrumbs"><span>Workspace</span><ChevronRight size={13} /><b>{active?.label ?? 'Dashboard'}</b></div></div><div className="topbar-actions"><span className="topbar-date"><span /> Workspace ready</span><ThemeToggle /><button className="top-icon" aria-label={dueReminderCount ? `${dueReminderCount} due reminders; open reminder list` : 'Open reminders'} onClick={() => navigate('/reminders')}><Bell size={18} />{dueReminderCount > 0 && <i className="reminder-bell-dot"/>}</button><div className="profile-wrap"><ProfileButton name={user?.name ?? 'Team'} email={user?.email ?? ''} onClick={() => setProfileOpen(!profileOpen)} />{profileOpen && <div className="profile-menu"><div className="profile-menu-head"><b>{user?.name}</b><span>{user?.role === 'SUPER_ADMIN' ? 'Super Admin' : 'Staff account'}</span></div><button onClick={doLogout}><LogOut size={16} /> Sign out</button></div>}</div></div></header>
+      <header className="topbar"><div className="topbar-left"><button className="mobile-menu" aria-label="Open navigation" onClick={() => setDrawerOpen(true)}><Menu size={21} /></button><div className="breadcrumbs"><span>Workspace</span><ChevronRight size={13} /><b>{active?.label ?? 'Dashboard'}</b></div></div><GlobalQuickSearch/><div className="topbar-actions"><span className="topbar-date"><span /> Workspace ready</span><ThemeToggle /><button className="top-icon" aria-label={dueReminderCount ? `${dueReminderCount} due reminders; open reminder list` : 'Open reminders'} onClick={() => navigate('/reminders')}><Bell size={18} />{dueReminderCount > 0 && <i className="reminder-bell-dot"/>}</button><div className="profile-wrap"><ProfileButton name={user?.name ?? 'Team'} email={user?.email ?? ''} onClick={() => setProfileOpen(!profileOpen)} />{profileOpen && <div className="profile-menu"><div className="profile-menu-head"><b>{user?.name}</b><span>{user?.role === 'SUPER_ADMIN' ? 'Super Admin' : 'Staff account'}</span></div><button onClick={doLogout}><LogOut size={16} /> Sign out</button></div>}</div></div></header>
       <main className="workspace-main"><Outlet /></main>
       <footer className="shell-footer"><span>© {new Date().getFullYear()} Aashray Hospitality</span><span>Built for thoughtful living <Sparkles size={10} className="footer-mark" /></span></footer>
     </div>

@@ -10,6 +10,7 @@ import financeRoutes from './routes/financeRoutes.js';
 import workspaceRoutes from './routes/workspaceRoutes.js';
 import propertyManagementRoutes from './routes/propertyManagementRoutes.js';
 import dataDeletionRoutes from './routes/dataDeletionRoutes.js';
+import quickSearchRoutes from './routes/quickSearchRoutes.js';
 import { requireCsrf } from './middleware/csrf.js';
 import { errorHandler, notFound } from './middleware/errors.js';
 import { availability } from './runtime/availability.js';
@@ -39,6 +40,7 @@ app.use('/api', requireCsrf, propertyManagementRoutes);
 app.use('/api', requireCsrf, dataDeletionRoutes);
 app.use('/api', requireCsrf, financeRoutes);
 app.use('/api', requireCsrf, workspaceRoutes);
+app.use('/api', requireCsrf, quickSearchRoutes);
 app.use(notFound);
 app.use(errorHandler);
 

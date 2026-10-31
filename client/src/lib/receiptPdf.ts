@@ -30,6 +30,7 @@ export type CheckoutSummaryPdfData = {
   checkoutDate: string;
   checkedOutAt: string;
   reason: string;
+  notes?: string;
   propertyName?: string;
   roomNumber?: string;
   bedId?: string;
@@ -362,26 +363,26 @@ function makeCheckoutCanvas(data: CheckoutSummaryPdfData, brandLogo: HTMLImageEl
   ctx.textAlign = 'left'; ctx.fillStyle = NAVY; ctx.font = 'bold 37px Arial, sans-serif'; ctx.fillText('Checkout summary', left, 235);
   drawField(ctx, left, 284, 'Resident', data.resident?.fullName || 'Resident', 500); drawField(ctx, left + 540, 284, 'Resident ID', data.resident?.residentId || 'Not available', 500);
   drawField(ctx, left, 354, 'Mobile', data.resident?.mobile || 'Not available', 500); drawField(ctx, left + 540, 354, 'Checkout date', formatDate(data.checkoutDate), 500);
-  drawField(ctx, left, 424, 'Property / room / bed', `${data.propertyName || 'Not assigned'} / ${data.roomNumber || '—'} / ${data.bedId || '—'}`, width); drawField(ctx, left, 494, 'Checkout reason', data.reason || 'Not provided', width);
-  drawSectionTitle(ctx, left, 580, 'Settlement status');
-  ctx.fillStyle = PALE_BLUE; ctx.fillRect(left, 600, width, 220); ctx.fillStyle = BLUE; ctx.fillRect(left, 600, 8, 220);
-  drawField(ctx, left + 30, 646, 'Outstanding at checkout', formatMoney(data.outstandingBeforePaise), 320);
-  drawField(ctx, left + 390, 646, 'Payable to Aashray now', formatMoney(data.settlementDuePaise), 320);
-  drawField(ctx, left + 750, 646, 'Payment status', data.settlementStatus === 'PAID' ? 'PAID' : data.settlementStatus === 'DUE' ? 'DUE / UNPAID' : data.settlementStatus === 'NO_DUE' ? 'NO DUE' : 'HISTORICAL RECORD', 300);
-  drawField(ctx, left + 30, 728, 'Deposit held', formatMoney(data.depositHeldPaise), 320);
-  drawField(ctx, left + 390, 728, 'Applied to charges', formatMoney(data.appliedToChargesPaise), 320);
-  ctx.fillStyle = '#d9f3e7'; ctx.fillRect(left + 738, 704, 318, 78); ctx.strokeStyle = '#56a77d'; ctx.lineWidth = 2; ctx.strokeRect(left + 738, 704, 318, 78);
-  ctx.textAlign = 'left'; ctx.fillStyle = '#315f48'; ctx.font = 'bold 17px Arial, sans-serif'; ctx.fillText('REFUNDABLE DEPOSIT', left + 750, 730);
-  ctx.fillStyle = '#12683d'; ctx.font = 'bold 29px Arial, sans-serif'; ctx.fillText(fitText(ctx, formatMoney(data.refundableRemainingPaise), 290), left + 750, 766);
-  if (data.settlementDuePaise > 0) { ctx.textAlign = 'left'; ctx.fillStyle = DARK_BLUE; ctx.font = 'bold 15px Arial, sans-serif'; ctx.fillText('Remaining settlement amount is payable to Aashray Hospitality.', left + 30, 808); }
-  drawSectionTitle(ctx, left, 880, 'Outstanding charge details');
-  let y = 906; ctx.fillStyle = PALE_BLUE; ctx.fillRect(left, y, width, 44); ctx.fillStyle = DARK_BLUE; ctx.font = 'bold 15px Arial, sans-serif'; ctx.textAlign = 'left'; ctx.fillText('CHARGE', left + 12, y + 28); ctx.textAlign = 'right'; ctx.fillText('AT CHECKOUT', right - 260, y + 28); ctx.fillText('BALANCE NOW', right - 12, y + 28); y += 44;
+  drawField(ctx, left, 424, 'Property / room / bed', `${data.propertyName || 'Not assigned'} / ${data.roomNumber || '—'} / ${data.bedId || '—'}`, width); drawField(ctx, left, 494, 'Checkout reason', data.reason || 'Not provided', width); drawField(ctx, left, 548, 'Checkout note', data.notes?.trim() || 'Not provided', width);
+  drawSectionTitle(ctx, left, 640, 'Settlement status');
+  ctx.fillStyle = PALE_BLUE; ctx.fillRect(left, 660, width, 220); ctx.fillStyle = BLUE; ctx.fillRect(left, 660, 8, 220);
+  drawField(ctx, left + 30, 706, 'Outstanding at checkout', formatMoney(data.outstandingBeforePaise), 320);
+  drawField(ctx, left + 390, 706, 'Payable to Aashray now', formatMoney(data.settlementDuePaise), 320);
+  drawField(ctx, left + 750, 706, 'Payment status', data.settlementStatus === 'PAID' ? 'PAID' : data.settlementStatus === 'DUE' ? 'DUE / UNPAID' : data.settlementStatus === 'NO_DUE' ? 'NO DUE' : 'HISTORICAL RECORD', 300);
+  drawField(ctx, left + 30, 788, 'Deposit held', formatMoney(data.depositHeldPaise), 320);
+  drawField(ctx, left + 390, 788, 'Applied to charges', formatMoney(data.appliedToChargesPaise), 320);
+  ctx.fillStyle = '#d9f3e7'; ctx.fillRect(left + 738, 764, 318, 78); ctx.strokeStyle = '#56a77d'; ctx.lineWidth = 2; ctx.strokeRect(left + 738, 764, 318, 78);
+  ctx.textAlign = 'left'; ctx.fillStyle = '#315f48'; ctx.font = 'bold 17px Arial, sans-serif'; ctx.fillText('REFUNDABLE DEPOSIT', left + 750, 790);
+  ctx.fillStyle = '#12683d'; ctx.font = 'bold 29px Arial, sans-serif'; ctx.fillText(fitText(ctx, formatMoney(data.refundableRemainingPaise), 290), left + 750, 826);
+  if (data.settlementDuePaise > 0) { ctx.textAlign = 'left'; ctx.fillStyle = DARK_BLUE; ctx.font = 'bold 15px Arial, sans-serif'; ctx.fillText('Remaining settlement amount is payable to Aashray Hospitality.', left + 30, 868); }
+  drawSectionTitle(ctx, left, 940, 'Outstanding charge details');
+  let y = 966; ctx.fillStyle = PALE_BLUE; ctx.fillRect(left, y, width, 44); ctx.fillStyle = DARK_BLUE; ctx.font = 'bold 15px Arial, sans-serif'; ctx.textAlign = 'left'; ctx.fillText('CHARGE', left + 12, y + 28); ctx.textAlign = 'right'; ctx.fillText('AT CHECKOUT', right - 260, y + 28); ctx.fillText('BALANCE NOW', right - 12, y + 28); y += 44;
   const shown = rows.slice(0, 7);
   if (!shown.length) { drawAllocationRow(ctx, left, y, width, 'No outstanding charge recorded at checkout', 'Rs. 0.00'); y += 50; }
   else for (const row of shown) { const label = [row.description, chargePeriod(row)].filter(Boolean).join(' · '); const now = row.currentBalancePaise ?? row.remainingPaise; ctx.fillStyle = INK; ctx.font = '16px Arial, sans-serif'; ctx.textAlign = 'left'; ctx.fillText(fitText(ctx, label, width - 500), left + 12, y + 29); ctx.textAlign = 'right'; ctx.fillText(formatMoney(row.remainingPaise), right - 260, y + 29); ctx.fillText(formatMoney(now), right - 12, y + 29); drawRule(ctx, left, y + 48, width); y += 50; }
   if (rows.length > shown.length) { ctx.textAlign = 'left'; ctx.fillStyle = MUTED; ctx.font = '15px Arial, sans-serif'; ctx.fillText(`${rows.length - shown.length} additional charges are listed in the resident ledger.`, left + 12, y + 26); y += 42; }
   if (data.cancelledRentCharges?.length) { ctx.textAlign = 'left'; ctx.fillStyle = MUTED; ctx.font = '15px Arial, sans-serif'; ctx.fillText(fitText(ctx, `Cancelled next-cycle rent: ${data.cancelledRentCharges.map((charge) => `${charge.periodKey} (${formatMoney(charge.amountPaise)})`).join(', ')}`, width - 24), left + 12, y + 24); y += 36; }
-  y = Math.max(y + 30, 1330); drawSectionTitle(ctx, left, y, 'Security deposit refund');
+  y = Math.max(y + 30, 1390); drawSectionTitle(ctx, left, y, 'Security deposit refund');
   ctx.fillStyle = PALE_BLUE; ctx.fillRect(left, y + 20, width, 125); ctx.fillStyle = INK; ctx.textAlign = 'left'; ctx.font = '18px Arial, sans-serif';
   wrapText(ctx, `Refundable deposit: ${formatMoney(data.refundableRemainingPaise)}. This amount will be refunded only after 21 days from checkout, on or after ${deadline}. Refunds recorded to date: ${formatMoney(data.refundedToDatePaise)}.`, left + 20, y + 58, width - 40, 28, 3);
   drawRule(ctx, left, 1654, width); ctx.fillStyle = MUTED; ctx.font = '16px Arial, sans-serif'; ctx.textAlign = 'left'; ctx.fillText('Aashray Hospitality  |  Checkout settlement summary', left, 1690); ctx.textAlign = 'right'; ctx.fillText('Prepared from saved resident and financial ledgers', right, 1690);
