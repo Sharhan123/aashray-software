@@ -19,7 +19,7 @@ import { AuditEvent } from '../models/AuditEvent.js';
 import { OwnerReminder } from '../models/OwnerReminder.js';
 import { requireAuth, requirePermission, requireRole } from '../middleware/auth.js';
 import { chargeBalance, chargeLedger, rentChargeLedger } from '../services/financialCalculations.js';
-import { billingStartDateForPeriod, periodKeyFor } from '../services/billingRules.js';
+import { billingCycleStartDate, billingDayForDate, periodKeyFor } from '../services/billingRules.js';
 import { businessMonthRange, rentChargeMongoFilter, summarizeRentCharges } from '../services/rentStatus.js';
 import { residentIsInScope, scopedResidentIds, scopedRoomIds } from '../middleware/propertyAccess.js';
 
@@ -295,19 +295,21 @@ router.post('/messages/prepare', requirePermission('messages:send'), asyncHandle
     const amount = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(balance / 100);
     const formatReminderDate = (date: Date) => new Intl.DateTimeFormat('en-IN', { dateStyle: 'long', timeZone: 'Asia/Kolkata' }).format(date);
     const due = charges[0]?.dueAt ? formatReminderDate(charges[0].dueAt) : 'your upcoming due date';
-    const rentPeriodKeys = [...new Set(charges.map((charge) => charge.periodKey).filter((key): key is string => Boolean(key && /^\d{4}-\d{2}$/.test(key))))].sort();
-    const periodStart = rentPeriodKeys.length
-      ? formatReminderDate(billingStartDateForPeriod(rentPeriodKeys[0]!, resident.dueDay))
-      : 'the current billing period';
-    const lastPeriodKey = rentPeriodKeys.at(-1);
-    let periodEnd = 'the end of the billing period';
-    if (lastPeriodKey) {
-      const [year, month] = lastPeriodKey.split('-').map(Number);
-      const nextPeriodKey = `${month === 12 ? year + 1 : year}-${String(month === 12 ? 1 : month + 1).padStart(2, '0')}`;
-      const end = billingStartDateForPeriod(nextPeriodKey, resident.dueDay);
+    const rentCycles = charges.flatMap((charge) => {
+      if (!/^\d{4}-\d{2}$/.test(charge.periodKey ?? '')) return [];
+      const schedule = resident.rentSchedules.find((entry) => entry.version === charge.scheduleVersion)
+        ?? [...resident.rentSchedules].sort((a, b) => b.version - a.version)[0];
+      const dueDay = schedule?.dueDay ?? billingDayForDate(resident.admissionDate);
+      const [year = 2000, month = 1] = charge.periodKey!.split('-').map(Number);
+      const nextMonthDate = new Date(Date.UTC(year, month, 1));
+      const nextPeriodKey = `${nextMonthDate.getUTCFullYear()}-${String(nextMonthDate.getUTCMonth() + 1).padStart(2, '0')}`;
+      const start = billingCycleStartDate(charge.periodKey!, dueDay);
+      const end = billingCycleStartDate(nextPeriodKey, dueDay);
       end.setUTCDate(end.getUTCDate() - 1);
-      periodEnd = formatReminderDate(end);
-    }
+      return [{ start, end }];
+    }).sort((a, b) => a.start.getTime() - b.start.getTime());
+    const periodStart = rentCycles.length ? formatReminderDate(rentCycles[0]!.start) : 'the current billing period';
+    const periodEnd = rentCycles.length ? formatReminderDate(rentCycles.at(-1)!.end) : 'the end of the billing period';
     const lateFeeDate = charges[0]?.dueAt ? new Date(charges[0].dueAt) : null;
     if (lateFeeDate) lateFeeDate.setUTCDate(lateFeeDate.getUTCDate() + 6);
     const periods = [...new Set(charges.map((charge) => charge.periodKey).filter(Boolean))];

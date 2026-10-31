@@ -510,6 +510,7 @@ router.post('/residents/:id/checkout', requirePermission('residents:write'), asy
   const data = z.object({
     effectiveEndDate: date,
     reason: z.string().trim().min(5).max(500),
+    notes: z.string().trim().max(1000).default(''),
     extraDays: z.number().int().min(0).max(90).default(0),
     perDayRatePaise: z.number().int().min(0).max(100000000).default(0),
     // Kept in the request schema for compatibility with older clients. The
@@ -603,7 +604,7 @@ router.post('/residents/:id/checkout', requirePermission('residents:write'), asy
       const amountPaise = balanceBeforeByCharge.get(String(charge._id)) ?? 0; const appliedPaise = appliedByCharge.get(String(charge._id)) ?? 0;
       return { chargeId: charge._id, kind: charge.kind, description: charge.description, periodKey: charge.periodKey, amountPaise, appliedPaise, remainingPaise: amountPaise - appliedPaise };
     });
-    const checkoutRecord = (await ResidentCheckout.create([{ residentId: current._id, checkoutDate: data.effectiveEndDate, checkedOutAt: new Date(), reason: data.reason, propertyName: checkoutProperty?.name ?? checkoutRoom?.propertyName ?? '', roomNumber: checkoutRoom?.roomNumber ?? '', bedId: checkoutAllocation?.bedId ?? '', outstandingBeforePaise, depositHeldPaise: depositBalance, appliedToChargesPaise: allocationTotal, refundedPaise: 0, depositRetainedPaise: remainingDepositPaise, outstandingAfterPaise: Math.max(0, outstandingBeforePaise + data.finalBills.reduce((sum, bill) => sum + bill.amountPaise, 0) - allocationTotal), charges: checkoutCharges, finalBills: finalBillCharges, cancelledRentCharges, idempotencyKey: data.idempotencyKey, createdBy: req.user!.id }], { session }))[0]!;
+    const checkoutRecord = (await ResidentCheckout.create([{ residentId: current._id, checkoutDate: data.effectiveEndDate, checkedOutAt: new Date(), reason: data.reason, notes: data.notes, propertyName: checkoutProperty?.name ?? checkoutRoom?.propertyName ?? '', roomNumber: checkoutRoom?.roomNumber ?? '', bedId: checkoutAllocation?.bedId ?? '', outstandingBeforePaise, depositHeldPaise: depositBalance, appliedToChargesPaise: allocationTotal, refundedPaise: 0, depositRetainedPaise: remainingDepositPaise, outstandingAfterPaise: Math.max(0, outstandingBeforePaise + data.finalBills.reduce((sum, bill) => sum + bill.amountPaise, 0) - allocationTotal), charges: checkoutCharges, finalBills: finalBillCharges, cancelledRentCharges, idempotencyKey: data.idempotencyKey, createdBy: req.user!.id }], { session }))[0]!;
     current.status = 'INACTIVE';
     current.effectiveEndDate = data.effectiveEndDate;
     current.checkoutIdempotencyKey = data.idempotencyKey;
@@ -611,7 +612,7 @@ router.post('/residents/:id/checkout', requirePermission('residents:write'), asy
     const currentRecord = current.allocations.find((item) => !item.endDate);
     if (currentRecord) currentRecord.endDate = data.effectiveEndDate;
     await current.save({ session });
-    await AuditEvent.create([{ actorId: req.user!.id, action: 'RESIDENT_CHECKED_OUT', entityType: 'Resident', entityId: String(current._id), reason: data.reason, details: { checkoutId: String(checkoutRecord._id), effectiveEndDate: data.effectiveEndDate, depositPaise: depositBalance, appliedToChargesPaise: allocationTotal, chargeAllocations: appliedEntries, finalBills: finalBillCharges, cancelledRentCharges, extraDays: data.extraDays, perDayRatePaise: data.perDayRatePaise, extraDaysPaise, refundedPaise: 0, remainingDepositPaise } }], { session });
+    await AuditEvent.create([{ actorId: req.user!.id, action: 'RESIDENT_CHECKED_OUT', entityType: 'Resident', entityId: String(current._id), reason: data.reason, details: { checkoutId: String(checkoutRecord._id), effectiveEndDate: data.effectiveEndDate, notes: data.notes, depositPaise: depositBalance, appliedToChargesPaise: allocationTotal, chargeAllocations: appliedEntries, finalBills: finalBillCharges, cancelledRentCharges, extraDays: data.extraDays, perDayRatePaise: data.perDayRatePaise, extraDaysPaise, refundedPaise: 0, remainingDepositPaise } }], { session });
     return { resident: current, checkout: checkoutRecord, duplicate: false, depositBalancePaise: remainingDepositPaise };
   });
   return res.json(result);

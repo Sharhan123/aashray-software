@@ -24,6 +24,7 @@ const residentCheckoutSchema = new Schema({
   checkoutDate: { type: Date, required: true },
   checkedOutAt: { type: Date, required: true },
   reason: { type: String, required: true, maxlength: 500 },
+  notes: { type: String, default: '', maxlength: 1000 },
   propertyName: { type: String, default: '' },
   roomNumber: { type: String, default: '' },
   bedId: { type: String, default: '' },
