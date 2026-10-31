@@ -24,9 +24,9 @@ router.get('/quick-search', asyncHandler(async (req, res) => {
   const lowered = raw.toLocaleLowerCase();
   const tokens = lowered.split(/\s+/).filter(Boolean);
   const intent: 'resident' | 'payment' | 'property' | null =
-    tokens.some((token) => intentWords.payment.includes(token)) ? 'payment' :
-    tokens.some((token) => intentWords.property.includes(token)) ? 'property' :
-    tokens.some((token) => intentWords.resident.includes(token)) ? 'resident' : null;
+    tokens.some((token) => intentWords.payment?.includes(token)) ? 'payment' :
+    tokens.some((token) => intentWords.property?.includes(token)) ? 'property' :
+    tokens.some((token) => intentWords.resident?.includes(token)) ? 'resident' : null;
   const text = tokens.filter((token) => !fillerWords.has(token) && !Object.values(intentWords).some((words) => words.includes(token))).join(' ').trim();
   const queryText = text || (intent ? '' : lowered);
   if (!queryText && !intent) return res.json({ residents: [], payments: [], properties: [] });
