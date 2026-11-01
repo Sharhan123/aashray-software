@@ -4,7 +4,7 @@ import { LoadingScreen } from './components/ui';
 import { useAuth } from './state/useAuth';
 import { LoginPage } from './pages/LoginPage';
 import { AppShell } from './shell/AppShell';
-import { BillingPage, DashboardLivePage, MessagesPage, OwnerRemindersPage, PaymentsPage, PropertiesPage, ReportsPage, ResidentDetailPage, ResidentsPage, RoomsPage, SettingsPage, StaffPage } from './pages/BusinessPages';
+import { BillingPage, DashboardLivePage, MessagesPage, OwnerRemindersPage, PaymentsPage, PropertiesPage, ReportsPage, ResidentDetailPage, ResidentsPage, RoomsPage, SettingsPage, StaffPage, RentHistoryPage } from './pages/BusinessPages';
 
 export function App() {
   const { state } = useAuth();
@@ -20,6 +20,7 @@ export function App() {
       <Route path="residents/:id" element={<ResidentDetailPage />} />
       <Route path="rooms" element={<RoomsPage />} />
       <Route path="billing" element={<BillingPage />} />
+      <Route path="rent-history" element={<RentHistoryPage />} />
       <Route path="payments" element={<PaymentsPage />} />
       <Route path="messages" element={<MessagesPage />} />
       <Route path="reminders" element={<OwnerRemindersPage />} />

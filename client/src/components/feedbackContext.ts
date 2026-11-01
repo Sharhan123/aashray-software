@@ -1,7 +1,7 @@
 import { createContext, useContext } from 'react';
 
 export type ToastTone = 'success' | 'error' | 'info';
-export type DialogField = { name: string; label: string; initialValue?: string; type?: 'text' | 'password' | 'number'; required?: boolean; minLength?: number; placeholder?: string };
+export type DialogField = { name: string; label: string; initialValue?: string; type?: 'text' | 'password' | 'number'; required?: boolean; minLength?: number; placeholder?: string; step?: number | 'any'; min?: number; max?: number };
 export type DialogOptions = { title: string; description: string; confirmLabel?: string; destructive?: boolean; fields?: DialogField[] };
 type FeedbackApi = { toast: (message: string, tone?: ToastTone) => void; ask: (options: DialogOptions) => Promise<Record<string, string> | null> };
 

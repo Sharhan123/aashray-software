@@ -41,6 +41,7 @@ import com.aashray.hospitality.data.StaffUpdateRequest
 import com.aashray.hospitality.data.RoomWriteRequest
 import com.aashray.hospitality.data.RoomDto
 import com.aashray.hospitality.data.UserDto
+import com.aashray.hospitality.reminders.ReminderAlarmScheduler
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
@@ -667,7 +668,7 @@ data class OperationsState(
 )
 
 @HiltViewModel
-class OperationsViewModel @Inject constructor(private val repository: AashrayRepository) : ViewModel() {
+class OperationsViewModel @Inject constructor(private val repository: AashrayRepository, private val reminderScheduler: ReminderAlarmScheduler) : ViewModel() {
     private val _state = MutableStateFlow(OperationsState())
     val state: StateFlow<OperationsState> = _state.asStateFlow()
     fun clearPrepared() { _state.value = _state.value.copy(preparedMessage = null) }
@@ -712,7 +713,7 @@ class OperationsViewModel @Inject constructor(private val repository: AashrayRep
         runCatching { repository.resetStaffPassword(id, password) }.onSuccess { _state.value = _state.value.copy(busy = false, notice = "Password reset; prior staff sessions were revoked.") }.onFailure { fail(it) }
     } }
 
-    fun loadOwnerReminders() { viewModelScope.launch { _state.value = _state.value.copy(busy = true, error = null); runCatching { repository.ownerReminders().reminders }.onSuccess { _state.value = _state.value.copy(ownerReminders = it, busy = false) }.onFailure { fail(it) } } }
+    fun loadOwnerReminders() { viewModelScope.launch { _state.value = _state.value.copy(busy = true, error = null); runCatching { repository.ownerReminders().reminders }.onSuccess { reminderScheduler.sync(it); _state.value = _state.value.copy(ownerReminders = it, busy = false) }.onFailure { fail(it) } } }
     fun createOwnerReminder(request: OwnerReminderRequest) { viewModelScope.launch { _state.value = _state.value.copy(busy = true, error = null, notice = null); runCatching { repository.createOwnerReminder(request) }.onSuccess { _state.value = _state.value.copy(busy = false, notice = "Reminder saved."); loadOwnerReminders() }.onFailure { fail(it) } } }
     fun acknowledgeOwnerReminder(id: String) { reminderAction { repository.acknowledgeOwnerReminder(id) } }
     fun snoozeOwnerReminder(id: String, minutes: Int) { reminderAction { repository.snoozeOwnerReminder(id, minutes) } }

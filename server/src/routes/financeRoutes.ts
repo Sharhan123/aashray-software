@@ -52,6 +52,8 @@ router.get('/charges', requirePermission('billing:read'), asyncHandler(async (re
       ] }];
     }
   }
+  const beforePeriod = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).safeParse(req.query.beforePeriod);
+  if (beforePeriod.success) filter.periodKey = { $lt: beforePeriod.data };
   const now = new Date();
   if (req.query.rentStatus && ['CLEARED', 'OVERDUE', 'DUE_GRACE', 'UPCOMING'].includes(String(req.query.rentStatus))) {
     filter.kind = 'RENT'; Object.assign(filter, rentChargeMongoFilter(String(req.query.rentStatus) as 'CLEARED' | 'OVERDUE' | 'DUE_GRACE' | 'UPCOMING', now));

@@ -6,8 +6,14 @@ import android.content.Intent
 import android.net.Uri
 import android.media.AudioManager
 import android.media.ToneGenerator
+import android.Manifest
+import android.app.AlarmManager
+import android.os.Build
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
+import android.content.pm.PackageManager
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -49,6 +55,9 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.aashray.hospitality.data.AppSettingsDto
 import com.aashray.hospitality.data.DepositRequest
 import com.aashray.hospitality.data.UtilityRequest
@@ -96,10 +105,10 @@ fun OwnerReminderAlarmHost(viewModel: OperationsViewModel, enabled: Boolean) {
     val now = remember { java.time.Clock.systemUTC() }
     val due = if (enabled) state.ownerReminders.firstOrNull { reminder -> reminder.active && runCatching { !Instant.parse(reminder.dueAt).isAfter(now.instant()) }.getOrDefault(false) } else null
     DisposableEffect(due?._id) {
-        val tone = if (due != null) ToneGenerator(AudioManager.STREAM_ALARM, 75) else null
+        val tone = if (due != null) ToneGenerator(AudioManager.STREAM_ALARM, 100) else null
         var running = true
         val job = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
-            while (running && due != null) { tone?.startTone(ToneGenerator.TONE_PROP_BEEP, 500); delay(2600) }
+            while (running && due != null) { tone?.startTone(ToneGenerator.TONE_PROP_BEEP2, 1000); delay(1800) }
         }
         onDispose { running = false; job.cancel(); tone?.release() }
     }
@@ -112,10 +121,10 @@ fun OwnerReminderAlarmHost(viewModel: OperationsViewModel, enabled: Boolean) {
                 SelectionField("Snooze", snoozeMinutes.toString(), listOf(5, 10, 15, 30, 60, 120).map { it.toString() to if (it >= 60) "${it / 60} hour${if (it > 60) "s" else ""}" else "$it minutes" }, { snoozeMinutes = it.toInt() })
             }
         },
-        confirmButton = { Button(onClick = { viewModel.acknowledgeOwnerReminder(reminder._id) }) { Text(if (reminder.repeatEveryHours == null) "Complete" else "Acknowledge") } },
+        confirmButton = { Button(onClick = { viewModel.stopOwnerReminder(reminder._id) }) { Text("Complete") } },
         dismissButton = { Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = { viewModel.snoozeOwnerReminder(reminder._id, snoozeMinutes) }) { Text("Snooze") }
-            TextButton(onClick = { viewModel.stopOwnerReminder(reminder._id) }) { Text("Stop") }
+            if (reminder.repeatEveryHours != null) TextButton(onClick = { viewModel.acknowledgeOwnerReminder(reminder._id) }) { Text("Acknowledge") }
         } },
     ) }
 }
@@ -131,8 +140,36 @@ fun OwnerRemindersScreen(viewModel: OperationsViewModel = hiltViewModel()) {
     val now = remember { java.time.Clock.systemUTC() }
     val localDateTime = runCatching { LocalDateTime.parse(dueAt, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")) }.getOrNull()
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var permissionRefresh by remember { mutableStateOf(0) }
+    val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { permissionRefresh++ }
+    LaunchedEffect(Unit) { viewModel.loadOwnerReminders() }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                permissionRefresh++
+                viewModel.loadOwnerReminders()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     val dueReminder = state.ownerReminders.firstOrNull { it.active && runCatching { Instant.parse(it.dueAt).isBefore(now.instant()) || Instant.parse(it.dueAt) == now.instant() }.getOrDefault(false) }
-    ToolPage("My reminders", "Schedule owner reminders. Due reminders ring while this screen is open; snooze, stop, or complete them here.", state.error, state.notice) {
+    ToolPage("My reminders", "Create reminders that alert you at the scheduled time, even when the app is in the background. Snooze, stop, or complete each reminder.", state.error, state.notice) {
+        val notificationsAllowed = remember(permissionRefresh) { Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED }
+        val exactAlarmsAllowed = remember(permissionRefresh) { Build.VERSION.SDK_INT < 31 || context.getSystemService(AlarmManager::class.java).canScheduleExactAlarms() }
+        if (!notificationsAllowed || !exactAlarmsAllowed) {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer), shape = RoundedCornerShape(12.dp)) {
+                Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Allow reminder alerts", fontWeight = FontWeight.SemiBold)
+                    Text("Android needs notification permission to show and ring reminders. Exact alarms make scheduled times more reliable.", style = MaterialTheme.typography.bodySmall)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (!notificationsAllowed && Build.VERSION.SDK_INT >= 33) OutlinedButton(onClick = { notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS) }) { Text("Allow notifications") }
+                        if (!exactAlarmsAllowed && Build.VERSION.SDK_INT >= 31) OutlinedButton(onClick = { runCatching { context.startActivity(android.content.Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)) }; permissionRefresh++ }) { Text("Allow exact alarms") }
+                    }
+                }
+            }
+        }
         Text("New reminder", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         OutlinedTextField(title, { title = it.take(160) }, Modifier.fillMaxWidth(), label = { Text("Reminder") }, singleLine = true)
         Text("Date and time · Asia/Kolkata", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -163,8 +200,8 @@ fun OwnerRemindersScreen(viewModel: OperationsViewModel = hiltViewModel()) {
                     SelectionField("Snooze", snoozeMinutes.toString(), listOf(5, 10, 15, 30, 60, 120).map { it.toString() to if (it == 60) "1 hour" else if (it == 120) "2 hours" else "$it minutes" }, { snoozeMinutes = it.toInt() })
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(onClick = { viewModel.snoozeOwnerReminder(reminder._id, snoozeMinutes) }, enabled = !state.busy) { Text("Snooze") }
-                        OutlinedButton(onClick = { viewModel.stopOwnerReminder(reminder._id) }, enabled = !state.busy) { Text("Stop") }
-                        Button(onClick = { viewModel.acknowledgeOwnerReminder(reminder._id) }, enabled = !state.busy) { Text(if (reminder.repeatEveryHours == null) "Complete" else "Acknowledge") }
+                        if (reminder.repeatEveryHours != null) TextButton(onClick = { viewModel.acknowledgeOwnerReminder(reminder._id) }, enabled = !state.busy) { Text("Acknowledge") }
+                        Button(onClick = { viewModel.stopOwnerReminder(reminder._id) }, enabled = !state.busy) { Text("Complete") }
                     }
                 }
             }

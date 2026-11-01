@@ -21,5 +21,6 @@ android/.gradle-user*/
 android/.android-user/
 android/.android-build-home/
 android/.android-verify-cache/
+.gradle-user-home/
 android/.avd/
 android/**/build/

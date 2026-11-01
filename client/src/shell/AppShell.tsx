@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
-import { AlarmClock, BedDouble, Bell, BellRing, Building2, ChartNoAxesCombined, ChevronLeft, ChevronRight, CircleDollarSign, Command, CreditCard, LayoutDashboard, LogOut, Menu, MessageSquareText, Settings, ShieldCheck, Sparkles, Users, X } from 'lucide-react';
+import { AlarmClock, BedDouble, Bell, BellRing, Building2, CalendarDays, ChartNoAxesCombined, ChevronLeft, ChevronRight, CircleDollarSign, Command, CreditCard, LayoutDashboard, LogOut, Menu, MessageSquareText, Settings, ShieldCheck, Sparkles, Users, X } from 'lucide-react';
 import { AashrayLogo, BrandMark } from '../components/BrandMark';
 import { useAuth } from '../state/useAuth';
 import { CloseButton, ProfileButton, ThemeToggle } from '../components/ui';
@@ -18,6 +18,7 @@ const mainItems = [
 const moreItems = [
   { label: 'Rooms & Beds', path: '/rooms', icon: BedDouble, permission: 'rooms:read' },
   { label: 'Rent & Billing', path: '/billing', icon: CircleDollarSign, permission: 'billing:read' },
+  { label: 'Rent by month', path: '/rent-history', icon: CalendarDays, permission: 'dashboard:read' },
   { label: 'Reminders & Messages', path: '/messages', icon: MessageSquareText, permission: 'messages:read' },
   { label: 'My reminders', path: '/reminders', icon: AlarmClock, permission: '__owner_only__' },
   { label: 'Reports', path: '/reports', icon: ChartNoAxesCombined, permission: 'reports:read' },
