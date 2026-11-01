@@ -130,10 +130,10 @@ router.get('/dashboard/rent-summary', requirePermission('dashboard:read'), async
   ]);
   const migrationChargePairs = migrationRows.length ? await Charge.find({ kind: 'RENT', $or: migrationRows.map((migration) => ({ residentId: migration.residentId, periodKey: migration.periodKey })) }).select('residentId periodKey').lean() : [];
   const migrationChargePairKeys = new Set(migrationChargePairs.map((charge) => `${String(charge.residentId)}:${charge.periodKey}`));
-  const rowsByResident = new Map<string, { residentObjectId: string; residentId: string; name: string; billedPaise: number; collectedPaise: number; outstandingPaise: number; dueAt: string | null; status: string }>();
+  const rowsByResident = new Map<string, { residentObjectId: string; residentId: string; name: string; propertyName: string; billedPaise: number; collectedPaise: number; outstandingPaise: number; dueAt: string | null; status: string }>();
   const getRow = (id: string, residentId = '', name = '') => {
     let row = rowsByResident.get(id);
-    if (!row) { row = { residentObjectId: id, residentId, name, billedPaise: 0, collectedPaise: 0, outstandingPaise: 0, dueAt: null, status: 'UNBILLED' }; rowsByResident.set(id, row); }
+    if (!row) { row = { residentObjectId: id, residentId, name, propertyName: '', billedPaise: 0, collectedPaise: 0, outstandingPaise: 0, dueAt: null, status: 'UNBILLED' }; rowsByResident.set(id, row); }
     else { if (residentId) row.residentId = residentId; if (name) row.name = name; }
     return row;
   };
@@ -162,6 +162,18 @@ router.get('/dashboard/rent-summary', requirePermission('dashboard:read'), async
     for (const resident of residents) getRow(String(resident._id), resident.residentId, resident.fullName);
   }
   const rows = [...rowsByResident.values()].sort((a, b) => a.name.localeCompare(b.name));
+  if (rows.length) {
+    const allocations = await RoomAllocation.find({ residentId: { $in: rows.map((row) => row.residentObjectId) } }).sort({ active: -1, startDate: -1 }).populate({ path: 'roomId', select: 'propertyName propertyId', populate: { path: 'propertyId', select: 'name' } }).lean();
+    const propertyNames = new Map<string, string>();
+    for (const allocation of allocations) {
+      const residentId = String(allocation.residentId);
+      if (propertyNames.has(residentId)) continue;
+      const room = allocation.roomId as unknown as { propertyName?: string; propertyId?: { name?: string } | null } | null;
+      const propertyName = room?.propertyId?.name || room?.propertyName || '';
+      if (propertyName) propertyNames.set(residentId, propertyName);
+    }
+    for (const row of rows) row.propertyName = propertyNames.get(row.residentObjectId) ?? '';
+  }
   const periodsByKey = new Map<string, { periodKey: string; billedPaise: number; collectedPaise: number; outstandingPaise: number }>(periodRows.map((row) => [String(row._id), { periodKey: String(row._id), billedPaise: Number(row.billedPaise), collectedPaise: Number(row.collectedPaise), outstandingPaise: Number(row.outstandingPaise) }]));
   for (const migration of migrationRows) {
     if (migrationChargePairKeys.has(`${String(migration.residentId)}:${migration.periodKey}`)) continue;

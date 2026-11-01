@@ -4,6 +4,7 @@ import { asyncHandler } from '../middleware/asyncHandler.js';
 import { Resident } from '../models/Resident.js';
 import { Payment } from '../models/Payment.js';
 import { Property } from '../models/Property.js';
+import { RoomAllocation } from '../models/RoomAllocation.js';
 import { scopedResidentIds } from '../middleware/propertyAccess.js';
 
 const router = Router();
@@ -38,7 +39,21 @@ router.get('/quick-search', asyncHandler(async (req, res) => {
       const scope = await scopedResidentIds(req);
       const filter: Record<string, unknown> = scope.ids === null ? {} : { _id: { $in: scope.ids } };
       if (regex) filter.$or = [{ fullName: regex }, { residentId: regex }, { mobile: regex }];
-      return Resident.find(filter).select('_id fullName residentId mobile status').sort({ fullName: 1 }).limit(6).lean();
+      const residents = await Resident.find(filter).select('_id fullName residentId mobile status').sort({ fullName: 1 }).limit(6).lean();
+      if (!residents.length) return residents;
+      const allocations = await RoomAllocation.find({ residentId: { $in: residents.map((resident) => resident._id) } })
+        .sort({ active: -1, startDate: -1 })
+        .populate({ path: 'roomId', select: 'propertyName propertyId', populate: { path: 'propertyId', select: 'name' } })
+        .lean();
+      const propertyNames = new Map<string, string>();
+      for (const allocation of allocations) {
+        const residentId = String(allocation.residentId);
+        if (propertyNames.has(residentId)) continue;
+        const room = allocation.roomId as unknown as { propertyName?: string; propertyId?: { name?: string } | null } | null;
+        const propertyName = room?.propertyId?.name || room?.propertyName || '';
+        if (propertyName) propertyNames.set(residentId, propertyName);
+      }
+      return residents.map((resident) => ({ ...resident, propertyName: propertyNames.get(String(resident._id)) ?? '' }));
     })();
   }
 
@@ -58,7 +73,21 @@ router.get('/quick-search', asyncHandler(async (req, res) => {
           ...(paymentId ? [{ _id: paymentId }] : []),
         ];
       }
-      return Payment.find(filter).populate('residentId', 'fullName residentId').sort({ paymentDate: -1 }).limit(6).lean();
+      const payments = await Payment.find(filter).populate('residentId', 'fullName residentId').sort({ paymentDate: -1 }).limit(6).lean();
+      const residentIds = payments.map((payment) => String((payment.residentId as unknown as { _id?: unknown } | null)?._id ?? '')).filter(Boolean);
+      const allocations = residentIds.length ? await RoomAllocation.find({ residentId: { $in: residentIds } }).sort({ active: -1, startDate: -1 }).populate({ path: 'roomId', select: 'propertyName propertyId', populate: { path: 'propertyId', select: 'name' } }).lean() : [];
+      const propertyNames = new Map<string, string>();
+      for (const allocation of allocations) {
+        const residentId = String(allocation.residentId);
+        if (propertyNames.has(residentId)) continue;
+        const room = allocation.roomId as unknown as { propertyName?: string; propertyId?: { name?: string } | null } | null;
+        const propertyName = room?.propertyId?.name || room?.propertyName || '';
+        if (propertyName) propertyNames.set(residentId, propertyName);
+      }
+      return payments.map((payment) => {
+        const resident = payment.residentId as unknown as { _id?: unknown } | null;
+        return { ...payment, propertyName: resident?._id ? propertyNames.get(String(resident._id)) ?? '' : '' };
+      });
     })();
   }
 

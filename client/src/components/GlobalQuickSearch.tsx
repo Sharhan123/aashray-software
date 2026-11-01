@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { ArrowRight, Building2, CreditCard, FileText, LayoutDashboard, Search, UserRound, Users, Wrench, X } from 'lucide-react';
 import { api } from '../lib/api';
@@ -6,8 +7,8 @@ import { useAuth } from '../state/useAuth';
 
 type SearchItem = { id: string; type: 'action' | 'resident' | 'payment' | 'property'; title: string; subtitle: string; href: string; icon: typeof Search; keywords?: string };
 type SearchResponse = {
-  residents: { _id: string; fullName: string; residentId: string; mobile: string; status: string }[];
-  payments: { _id: string; paymentDate: string; amountPaise: number; method: string; reference?: string; residentId?: { _id: string; fullName: string; residentId: string } }[];
+  residents: { _id: string; fullName: string; residentId: string; mobile: string; status: string; propertyName?: string }[];
+  payments: { _id: string; paymentDate: string; amountPaise: number; method: string; reference?: string; propertyName?: string; residentId?: { _id: string; fullName: string; residentId: string } }[];
   properties: { _id: string; name: string; address?: string; gender?: string | null }[];
 };
 
@@ -109,8 +110,8 @@ export function GlobalQuickSearch() {
 
   const grouped = useMemo(() => {
     if (!user) return [] as SearchItem[];
-    const residentResults: SearchItem[] = records.residents.map((resident) => ({ id: `resident-${resident._id}`, type: 'resident', title: resident.fullName, subtitle: `${resident.residentId} · ${resident.mobile} · ${resident.status.toLowerCase()}`, href: `/residents/${resident._id}`, icon: UserRound }));
-    const paymentResults: SearchItem[] = records.payments.map((payment) => ({ id: `payment-${payment._id}`, type: 'payment', title: `${payment.residentId?.fullName ?? 'Resident'} · ₹${(payment.amountPaise / 100).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`, subtitle: `Receipt · ${payment.method.replace('_', ' ')} · ${new Date(payment.paymentDate).toLocaleDateString('en-IN')}${payment.reference ? ` · Ref ${payment.reference}` : ''}`, href: `/payments?receipt=${payment._id}`, icon: FileText }));
+    const residentResults: SearchItem[] = records.residents.map((resident) => ({ id: `resident-${resident._id}`, type: 'resident', title: resident.fullName, subtitle: [resident.propertyName, resident.mobile, resident.status.toLowerCase()].filter(Boolean).join(' · '), href: `/residents/${resident._id}`, icon: UserRound }));
+    const paymentResults: SearchItem[] = records.payments.map((payment) => ({ id: `payment-${payment._id}`, type: 'payment', title: `${payment.residentId?.fullName ?? 'Resident'} · ₹${(payment.amountPaise / 100).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`, subtitle: [payment.propertyName, 'Receipt', payment.method.replace('_', ' '), new Date(payment.paymentDate).toLocaleDateString('en-IN'), payment.reference ? `Ref ${payment.reference}` : ''].filter(Boolean).join(' · '), href: `/payments?receipt=${payment._id}`, icon: FileText }));
     const propertyResults: SearchItem[] = records.properties.map((property) => ({ id: `property-${property._id}`, type: 'property', title: property.name, subtitle: [property.gender?.toLowerCase(), property.address].filter(Boolean).join(' · ') || 'Property workspace', href: `/properties/${property._id}`, icon: Building2 }));
     let actionResults = visibleActions;
     if (debouncedQuery.toLowerCase().split(/\s+/).some((word) => ['receipt', 'receipts', 'recipt', 'reciept', 'payment', 'payments'].includes(word))) {
@@ -132,8 +133,8 @@ export function GlobalQuickSearch() {
   const trigger = <button type="button" className="quick-search-trigger" onClick={() => setOpen(true)} aria-label="Search workspace"><Search size={16}/><span>Search anything...</span><kbd>Ctrl K</kbd></button>;
   if (!open) return trigger;
 
-  return <>{trigger}<div className="quick-search-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setOpen(false); }}>
-    <section className="quick-search-dialog" role="dialog" aria-modal="true" aria-label="Search workspace" onKeyDown={(event) => { if (event.key === 'Escape') setOpen(false); }}>
+  return <>{trigger}{createPortal(<div className="quick-search-backdrop" onClick={(event) => { if (event.target === event.currentTarget) setOpen(false); }}>
+    <section className="quick-search-dialog" role="dialog" aria-modal="true" aria-label="Search workspace" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === 'Escape') setOpen(false); }}>
       <div className="quick-search-input-row"><Search size={20}/><input ref={inputRef} value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={onInputKeyDown} placeholder="Search residents, receipts, properties, or actions..." aria-label="Search residents, receipts, properties, or actions"/><kbd>ESC</kbd><button type="button" aria-label="Close search" onClick={() => setOpen(false)}><X size={18}/></button></div>
       <div className="quick-search-content" role="listbox" aria-label="Search results">
         {debouncedQuery.length < 2 ? <><p className="quick-search-hint">QUICK ACCESS <span>Type a name, receipt, property, or task</span></p>{visibleActions.map((item, index) => <button type="button" role="option" aria-selected={activeIndex === index} key={item.id} className={`quick-search-result ${activeIndex === index ? 'is-active' : ''}`} onMouseEnter={() => setActiveIndex(index)} onClick={() => choose(item)}><span className="quick-search-result-icon"><item.icon size={17}/></span><span className="quick-search-result-copy"><b>{item.title}</b><small>{item.subtitle}</small></span><ArrowRight size={15}/></button>)}</> : <>
@@ -149,5 +150,5 @@ export function GlobalQuickSearch() {
       </div>
       <footer className="quick-search-footer"><span><kbd>↑</kbd><kbd>↓</kbd> Navigate</span><span><kbd>↵</kbd> Open result</span><span><kbd>Ctrl K</kbd> Open search</span></footer>
     </section>
-  </div></>;
+  </div>, document.body)}</>;
 }

@@ -23,6 +23,23 @@ import { resolveUtilityPeriod, utilityPeriodDescription, utilityPeriodMonthKeys,
 const router = Router(); router.use(requireAuth);
 const id = z.string().regex(/^[a-f\d]{24}$/i); const day = z.coerce.date();
 const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+async function propertyNamesByResident(residentIds: unknown[]) {
+  const ids = [...new Set(residentIds.map(String).filter(Boolean))];
+  if (!ids.length) return new Map<string, string>();
+  const allocations = await RoomAllocation.find({ residentId: { $in: ids } })
+    .sort({ active: -1, startDate: -1 })
+    .populate({ path: 'roomId', select: 'propertyName propertyId', populate: { path: 'propertyId', select: 'name' } })
+    .lean();
+  const names = new Map<string, string>();
+  for (const allocation of allocations) {
+    const residentId = String(allocation.residentId);
+    if (names.has(residentId)) continue;
+    const room = allocation.roomId as unknown as { propertyName?: string; propertyId?: { name?: string } | null } | null;
+    const name = room?.propertyId?.name || room?.propertyName || '';
+    if (name) names.set(residentId, name);
+  }
+  return names;
+}
 function rangeDate(value: unknown, upperBoundary = false) {
   const text = String(value); const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
   if (match) return upperBoundary
@@ -81,6 +98,7 @@ router.get('/charges', requirePermission('billing:read'), asyncHandler(async (re
     res.type('text/csv'); res.setHeader('Content-Disposition', 'attachment; filename="aashray-charges.csv"'); return res.send(csv);
   }
   const [charges, total] = await Promise.all([Charge.find(filter).populate('residentId', 'residentId fullName mobile').sort({ dueAt: -1 }).skip((page - 1) * limit).limit(limit).lean(), Charge.countDocuments(filter)]);
+  const chargePropertyNames = await propertyNamesByResident(charges.map((charge) => (charge.residentId as unknown as { _id?: unknown } | null)?._id).filter(Boolean));
   const paymentRows = charges.length ? await Payment.find({ 'allocations.chargeId': { $in: charges.map((charge) => charge._id) } }).select('_id amountPaise paymentDate method reference reversedAt allocations').sort({ paymentDate: -1 }).lean() : [];
   const paymentsByCharge = new Map<string, Record<string, unknown>[]>();
   for (const payment of paymentRows) {
@@ -91,7 +109,7 @@ router.get('/charges', requirePermission('billing:read'), asyncHandler(async (re
       paymentsByCharge.set(key, entries);
     }
   }
-  return res.json({ charges: charges.map((c) => ({ ...c, ...(c.kind === 'RENT' ? rentChargeLedger(c) : chargeLedger(c)), paymentHistory: paymentsByCharge.get(String(c._id)) ?? [] })), page, limit, total, pages: Math.ceil(total / limit) });
+  return res.json({ charges: charges.map((c) => { const resident = c.residentId as unknown as { _id?: unknown } | null; return { ...c, residentId: resident ? { ...resident, propertyName: chargePropertyNames.get(String(resident._id)) ?? '' } : null, ...(c.kind === 'RENT' ? rentChargeLedger(c) : chargeLedger(c)), paymentHistory: paymentsByCharge.get(String(c._id)) ?? [] }; }), page, limit, total, pages: Math.ceil(total / limit) });
 }));
 
 router.post('/utilities', requirePermission('utilities:write'), asyncHandler(async (req, res) => {
@@ -218,6 +236,7 @@ router.get('/payment-ledger/:kind', requirePermission('payments:read'), asyncHan
       Payment.find({ ...residentFilter, ...dateFilter('paymentDate') }).populate('residentId', 'residentId fullName').sort({ paymentDate: -1 }).limit(5000).lean(),
       DepositTransaction.find({ ...residentFilter, ...dateFilter('createdAt') }).populate('residentId', 'residentId fullName').sort({ createdAt: -1 }).limit(5000).lean(),
     ]);
+    const ledgerPropertyNames = await propertyNamesByResident([...payments, ...deposits].map((row) => (row.residentId as unknown as { _id?: unknown } | null)?._id).filter(Boolean));
     const chargeIds = [...new Set(payments.flatMap((payment) => payment.allocations.map((allocation) => String(allocation.chargeId))))];
     const charges = chargeIds.length ? await Charge.find({ _id: { $in: chargeIds } }).select('_id kind description').lean() : [];
     const chargeMap = new Map(charges.map((charge) => [String(charge._id), charge]));
@@ -228,7 +247,7 @@ router.get('/payment-ledger/:kind', requirePermission('payments:read'), asyncHan
       const kinds = [...new Set(matched.map((item) => item.charge!.kind))];
       const type = kinds.length > 1 ? 'MIXED' : kinds[0] ?? 'OTHER';
       return {
-        id: String(payment._id), paymentId: String(payment._id), residentId: resident?._id ? String(resident._id) : '', resident: resident?.fullName ?? 'Resident', residentCode: resident?.residentId ?? '',
+        id: String(payment._id), paymentId: String(payment._id), residentId: resident?._id ? String(resident._id) : '', resident: resident?.fullName ?? 'Resident', residentCode: resident?.residentId ?? '', propertyName: resident?._id ? ledgerPropertyNames.get(String(resident._id)) ?? '' : '',
         date: payment.paymentDate, type, description: [...new Set(matched.map((item) => item.charge!.description))].join(', '), method: payment.method,
         amountRupees: payment.amountPaise / 100, categoryAmountRupees: matched.reduce((sum, item) => sum + item.allocation.amountPaise, 0) / 100,
         amountPaise: payment.amountPaise, unallocatedPaise: payment.reversedAt ? 0 : payment.amountPaise - allocatedPaise,
@@ -238,17 +257,18 @@ router.get('/payment-ledger/:kind', requirePermission('payments:read'), asyncHan
       };
     });
     const depositRows = deposits.map((entry) => {
-      const resident = entry.residentId as unknown as { residentId?: string; fullName?: string } | null;
-      return { id: String(entry._id), date: entry.createdAt, resident: resident?.fullName ?? 'Resident', residentCode: resident?.residentId ?? '', type: 'DEPOSIT', entry: entry.kind, method: entry.paymentMethod, amountRupees: entry.amountPaise / 100, reference: entry.reference || '', notes: '', reason: entry.reason || '', status: entry.kind };
+      const resident = entry.residentId as unknown as { _id?: unknown; residentId?: string; fullName?: string } | null;
+      return { id: String(entry._id), date: entry.createdAt, resident: resident?.fullName ?? 'Resident', residentCode: resident?.residentId ?? '', propertyName: resident?._id ? ledgerPropertyNames.get(String(resident._id)) ?? '' : '', type: 'DEPOSIT', entry: entry.kind, method: entry.paymentMethod, amountRupees: entry.amountPaise / 100, reference: entry.reference || '', notes: '', reason: entry.reason || '', status: entry.kind };
     });
     return res.json({ rows: [...paymentRows, ...depositRows].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()) });
   }
 
   if (kind === 'deposits') {
     const entries = await DepositTransaction.find({ ...residentFilter, ...dateFilter('createdAt') }).populate('residentId', 'residentId fullName').sort({ createdAt: -1 }).limit(5000).lean();
+    const ledgerPropertyNames = await propertyNamesByResident(entries.map((entry) => (entry.residentId as unknown as { _id?: unknown } | null)?._id).filter(Boolean));
     return res.json({ rows: entries.map((entry) => {
-      const resident = entry.residentId as unknown as { residentId?: string; fullName?: string } | null;
-      return { date: entry.createdAt, resident: resident?.fullName ?? 'Resident', residentCode: resident?.residentId ?? '', entry: entry.kind, method: entry.paymentMethod, amountRupees: entry.amountPaise / 100, reference: entry.reference || '', reason: entry.reason || '' };
+      const resident = entry.residentId as unknown as { _id?: unknown; residentId?: string; fullName?: string } | null;
+      return { date: entry.createdAt, resident: resident?.fullName ?? 'Resident', residentCode: resident?.residentId ?? '', propertyName: resident?._id ? ledgerPropertyNames.get(String(resident._id)) ?? '' : '', entry: entry.kind, method: entry.paymentMethod, amountRupees: entry.amountPaise / 100, reference: entry.reference || '', reason: entry.reason || '' };
     }) });
   }
 
@@ -257,14 +277,15 @@ router.get('/payment-ledger/:kind', requirePermission('payments:read'), asyncHan
   if (!charges.length) return res.json({ rows: [] });
   const chargeMap = new Map(charges.map((charge) => [String(charge._id), charge]));
   const payments = await Payment.find({ ...residentFilter, ...dateFilter('paymentDate'), 'allocations.chargeId': { $in: charges.map((charge) => charge._id) } }).populate('residentId', 'residentId fullName').sort({ paymentDate: -1 }).limit(5000).lean();
+  const ledgerPropertyNames = await propertyNamesByResident(payments.map((payment) => (payment.residentId as unknown as { _id?: unknown } | null)?._id).filter(Boolean));
   const rows = payments.map((payment) => {
-    const resident = payment.residentId as unknown as { residentId?: string; fullName?: string } | null;
+    const resident = payment.residentId as unknown as { _id?: unknown; residentId?: string; fullName?: string } | null;
     const matched = payment.allocations.flatMap((allocation) => {
       const charge = chargeMap.get(String(allocation.chargeId));
       return charge ? [{ description: charge.description, amountPaise: allocation.amountPaise }] : [];
     });
     const categoryAmountPaise = matched.reduce((sum, allocation) => sum + allocation.amountPaise, 0);
-    return { paymentId: String(payment._id), date: payment.paymentDate, resident: resident?.fullName ?? 'Resident', residentCode: resident?.residentId ?? '', description: [...new Set(matched.map((allocation) => allocation.description))].join(', '), method: payment.method, amountRupees: payment.amountPaise / 100, categoryAmountRupees: categoryAmountPaise / 100, reference: payment.reference || '', notes: payment.notes || '', status: payment.reversedAt ? 'REVERSED' : 'RECORDED' };
+    return { paymentId: String(payment._id), date: payment.paymentDate, resident: resident?.fullName ?? 'Resident', residentCode: resident?.residentId ?? '', propertyName: resident?._id ? ledgerPropertyNames.get(String(resident._id)) ?? '' : '', description: [...new Set(matched.map((allocation) => allocation.description))].join(', '), method: payment.method, amountRupees: payment.amountPaise / 100, categoryAmountRupees: categoryAmountPaise / 100, reference: payment.reference || '', notes: payment.notes || '', status: payment.reversedAt ? 'REVERSED' : 'RECORDED' };
   });
   return res.json({ rows });
 }));
