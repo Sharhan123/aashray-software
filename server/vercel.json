@@ -3,9 +3,16 @@
   "framework": "express",
   "installCommand": "npm ci --include=dev",
   "buildCommand": "npm run build",
+  "crons": [
+    {
+      "path": "/api/cron/monthly-rent",
+      "schedule": "0 19 * * *"
+    }
+  ],
   "functions": {
     "src/app.ts": {
       "maxDuration": 60
     }
   }
 }
+
